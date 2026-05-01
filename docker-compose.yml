@@ -1,0 +1,40 @@
+services:
+  cli-proxy-api:
+    image: ${CLI_PROXY_IMAGE:-llm-server/cli-proxy-api:local}
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-local}
+        COMMIT: ${COMMIT:-none}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    container_name: cli-proxy-api
+    env_file:
+      - .env
+    environment:
+      # MANAGEMENT_PASSWORD must come from .env. We do NOT default it: an unset
+      # password would silently disable management routes and break the UI.
+      MANAGEMENT_PASSWORD: ${MANAGEMENT_PASSWORD:?Set MANAGEMENT_PASSWORD in .env (copy from .env.example)}
+      TZ: ${TZ:-Etc/UTC}
+      DEPLOY: ${DEPLOY:-}
+    ports:
+      # Main proxy + management API + bundled UI
+      - "${CLI_PROXY_PORT:-8317}:8317"
+      # OAuth callback ports — provider redirects come back to localhost on the host
+      # and these mappings forward them into the container.
+      - "1455:1455"   # Codex (OpenAI) callback
+      - "8085:8085"   # Gemini / Google callback
+      - "54545:54545" # Anthropic / Claude callback
+      - "51121:51121" # Antigravity callback
+    volumes:
+      - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
+      - ${CLI_PROXY_AUTH_PATH:-./auths}:/CLIProxyAPI/auths
+      - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8317/healthz"]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
