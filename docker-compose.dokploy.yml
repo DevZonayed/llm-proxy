@@ -1,0 +1,65 @@
+# Production compose for Dokploy. Dokploy handles Traefik labels, network
+# attachment, and the public domain itself — no need to declare any of that here.
+#
+# How it differs from docker-compose.yml (local dev):
+#   - No host port bindings for OAuth callback ports (1455/8085/54545/51121).
+#     They only matter when the browser and the server share the same localhost.
+#     For remote deployments, use the "Paste callback URL" flow in the UI:
+#       1. Click "Open link" on the OAuth card → authorise with Claude/etc.
+#       2. The provider redirects to http://localhost:54545/callback (this
+#          fails on the user's machine — that's expected).
+#       3. Copy the full URL from the browser address bar.
+#       4. Paste it into the "Callback URL" field in the UI and submit.
+#       5. The server picks up the code+state and stores the token.
+#   - No bind mounts to host paths — uses named volumes that Dokploy manages.
+#   - No reliance on a local .env file; all env vars come from Dokploy's UI.
+#   - First-start config seeding via docker-entrypoint.sh.
+#
+# Required env vars (set these in Dokploy → Environment):
+#   MANAGEMENT_PASSWORD   strong secret to log into /management.html
+#
+# Optional:
+#   TZ                    container timezone (default: Etc/UTC)
+
+services:
+  cli-proxy-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-prod}
+        COMMIT: ${COMMIT:-none}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    environment:
+      MANAGEMENT_PASSWORD: ${MANAGEMENT_PASSWORD:?MANAGEMENT_PASSWORD must be set in Dokploy environment}
+      TZ: ${TZ:-Etc/UTC}
+      # Tells the entrypoint where to seed/persist the config. The binary then
+      # reads the symlinked /CLIProxyAPI/config.yaml as usual.
+      CLI_PROXY_CONFIG_FILE: /CLIProxyAPI/config/config.yaml
+    expose:
+      - "8317"
+    volumes:
+      - cli-proxy-auths:/CLIProxyAPI/auths
+      - cli-proxy-logs:/CLIProxyAPI/logs
+      # Persists config edits made via the management UI. To ship a fixed config
+      # from source, comment this out and bind-mount your own config.yaml into
+      # /CLIProxyAPI/config/config.yaml via Dokploy's "Volumes" tab instead.
+      - cli-proxy-config:/CLIProxyAPI/config
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8317/healthz"]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    networks:
+      - dokploy-network
+
+volumes:
+  cli-proxy-auths:
+  cli-proxy-logs:
+  cli-proxy-config:
+
+networks:
+  dokploy-network:
+    external: true

@@ -44,6 +44,9 @@ WORKDIR /CLIProxyAPI
 COPY --from=go-builder /app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
 COPY --from=web-builder /web/dist/index.html /CLIProxyAPI/static/management.html
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml
+COPY config.production.yaml /CLIProxyAPI/config.production.yaml
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Tell the Go server where the locally built UI lives so it never reaches out to GitHub.
 ENV MANAGEMENT_STATIC_PATH=/CLIProxyAPI/static \
@@ -56,4 +59,5 @@ EXPOSE 8317 1455 8085 54545 51121
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8317/healthz || exit 1
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["./CLIProxyAPI"]
