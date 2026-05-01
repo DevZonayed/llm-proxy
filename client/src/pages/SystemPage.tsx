@@ -415,7 +415,7 @@ export function SystemPage() {
             </a>
 
             <a
-              href="https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+              href="https://github.com/DevZonayed/llm-proxy"
               target="_blank"
               rel="noopener noreferrer"
               className={styles.linkCard}

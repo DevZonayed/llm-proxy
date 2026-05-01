@@ -490,9 +490,8 @@ export function VisualConfigEditor({
           <button
             key={section.id}
             type="button"
-            className={`${styles.navButton} ${
-              activeSectionId === section.id ? styles.navButtonActive : ''
-            }`}
+            className={`${styles.navButton} ${activeSectionId === section.id ? styles.navButtonActive : ''
+              }`}
             onClick={() => handleSectionJump(section.id)}
           >
             <span className={styles.navIndex}>{String(index + 1).padStart(2, '0')}</span>
@@ -542,9 +541,8 @@ export function VisualConfigEditor({
               <button
                 key={section.id}
                 type="button"
-                className={`${styles.overviewFocusLink} ${
-                  activeSectionId === section.id ? styles.overviewFocusLinkActive : ''
-                }`}
+                className={`${styles.overviewFocusLink} ${activeSectionId === section.id ? styles.overviewFocusLinkActive : ''
+                  }`}
                 onClick={() => handleSectionJump(section.id)}
               >
                 <span className={styles.focusIcon}>
@@ -580,9 +578,8 @@ export function VisualConfigEditor({
                     mobileNavButtonRefs.current[section.id] = node;
                   }}
                   type="button"
-                  className={`${styles.mobileSectionNavButton} ${
-                    activeSectionId === section.id ? styles.mobileSectionNavButtonActive : ''
-                  }`}
+                  className={`${styles.mobileSectionNavButton} ${activeSectionId === section.id ? styles.mobileSectionNavButtonActive : ''
+                    }`}
                   onClick={() => handleSectionJump(section.id)}
                 >
                   <span className={styles.mobileSectionNavIndex}>
@@ -718,7 +715,7 @@ export function VisualConfigEditor({
                 />
                 <Input
                   label={t('config_management.visual.sections.remote.panel_repo')}
-                  placeholder="https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+                  placeholder="https://github.com/DevZonayed/llm-proxy"
                   value={values.rmPanelRepo}
                   onChange={(e) => onChange({ rmPanelRepo: e.target.value })}
                   disabled={disabled}
@@ -1138,11 +1135,11 @@ export function VisualConfigEditor({
 
       {shouldRenderFloatingSidebar && typeof document !== 'undefined'
         ? createPortal(
-            <div ref={floatingSidebarRef} className={styles.floatingSidebarContainer}>
-              <div className={styles.floatingSidebarRail}>{navContent}</div>
-            </div>,
-            document.body
-          )
+          <div ref={floatingSidebarRef} className={styles.floatingSidebarContainer}>
+            <div className={styles.floatingSidebarRail}>{navContent}</div>
+          </div>,
+          document.body
+        )
         : null}
     </div>
   );
