@@ -36,6 +36,9 @@ services:
       # Tells the entrypoint where to seed/persist the config. The binary then
       # reads the symlinked /CLIProxyAPI/config.yaml as usual.
       CLI_PROXY_CONFIG_FILE: /CLIProxyAPI/config/config.yaml
+      # Optional: comma-separated client keys. When set, replaces the api-keys
+      # list in config.yaml on every startup. Leave unset to manage via the UI.
+      CLI_PROXY_API_KEYS: ${CLI_PROXY_API_KEYS:-}
     expose:
       - "8317"
     volumes:

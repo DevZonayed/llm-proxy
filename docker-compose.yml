@@ -18,6 +18,9 @@ services:
       MANAGEMENT_PASSWORD: ${MANAGEMENT_PASSWORD:?Set MANAGEMENT_PASSWORD in .env (copy from .env.example)}
       TZ: ${TZ:-Etc/UTC}
       DEPLOY: ${DEPLOY:-}
+      # Optional: comma-separated client keys. When set, replaces the api-keys
+      # list in config.yaml on every startup. Leave unset to manage via the UI.
+      CLI_PROXY_API_KEYS: ${CLI_PROXY_API_KEYS:-}
     ports:
       # Main proxy + management API + bundled UI
       - "${CLI_PROXY_PORT:-8317}:8317"

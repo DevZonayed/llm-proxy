@@ -36,7 +36,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # ---- 3. Runtime image ----
 FROM alpine:3.22.0
 
-RUN apk add --no-cache tzdata ca-certificates curl \
+RUN apk add --no-cache tzdata ca-certificates curl yq \
     && mkdir -p /CLIProxyAPI/static /CLIProxyAPI/auths /CLIProxyAPI/logs
 
 WORKDIR /CLIProxyAPI
