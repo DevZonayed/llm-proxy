@@ -7,7 +7,12 @@ import type {
   PayloadRule,
   VisualConfigValues,
   VisualConfigValidationErrors,
+  VisualConfigPatch,
   PayloadParamValidationErrorCode,
+  OrchestratorMode,
+  OrchestratorPolicyKind,
+  OrchestratorLearnedFallback,
+  OrchestratorVisualConfig,
 } from '@/types/visualConfig';
 import { DEFAULT_VISUAL_VALUES } from '@/types/visualConfig';
 
@@ -209,6 +214,247 @@ function hasPayloadParamValidationErrors(rules: PayloadRule[]): boolean {
 function deepClone<T>(value: T): T {
   if (typeof structuredClone === 'function') return structuredClone(value);
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function parseOrchestratorMode(value: unknown): OrchestratorMode {
+  if (value === 'single-shot' || value === 'tri-role') return value;
+  return 'auto';
+}
+
+function parseOrchestratorPolicyKind(value: unknown): OrchestratorPolicyKind {
+  return value === 'learned' ? 'learned' : 'rules';
+}
+
+function parseOrchestratorFallback(value: unknown): OrchestratorLearnedFallback {
+  return value === 'fail' ? 'fail' : 'rules';
+}
+
+function parseStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+    .filter((entry) => entry.length > 0);
+}
+
+function parseDefaultsBlockToText(value: unknown): string {
+  const record = asRecord(value);
+  if (!record) return '';
+  const lines: string[] = [];
+  for (const [key, raw] of Object.entries(record)) {
+    if (!key.trim()) continue;
+    const list = parseStringList(raw);
+    lines.push(`${key}: ${list.join(', ')}`);
+  }
+  return lines.join('\n');
+}
+
+function parseModelsBlockToText(value: unknown): string {
+  const record = asRecord(value);
+  if (!record) return '';
+  const lines: string[] = [];
+  for (const [key, raw] of Object.entries(record)) {
+    if (!key.trim()) continue;
+    const v = typeof raw === 'string' ? raw : '';
+    lines.push(`${key}: ${v}`);
+  }
+  return lines.join('\n');
+}
+
+function serializeDefaultsTextToYaml(text: string): Record<string, string[]> | undefined {
+  const out: Record<string, string[]> = {};
+  let touched = false;
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const colonIdx = line.indexOf(':');
+    if (colonIdx < 0) continue;
+    const key = line.slice(0, colonIdx).trim();
+    const rest = line.slice(colonIdx + 1).trim();
+    if (!key) continue;
+    const providers = rest
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    out[key] = providers;
+    touched = true;
+  }
+  return touched ? out : undefined;
+}
+
+function serializeModelsTextToYaml(text: string): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  let touched = false;
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const colonIdx = line.indexOf(':');
+    if (colonIdx < 0) continue;
+    const key = line.slice(0, colonIdx).trim();
+    const rest = line.slice(colonIdx + 1).trim();
+    if (!key) continue;
+    out[key] = rest;
+    touched = true;
+  }
+  return touched ? out : undefined;
+}
+
+function parseOrchestratorBlock(value: unknown): OrchestratorVisualConfig {
+  const base = deepClone(DEFAULT_VISUAL_VALUES.orchestrator);
+  const record = asRecord(value);
+  if (!record) return base;
+
+  if (typeof record.enabled === 'boolean') base.enabled = record.enabled;
+  base.mode = parseOrchestratorMode(record.mode);
+  base.enabledForApiKeysText = parseStringList(record['enabled-for-api-keys']).join('\n');
+  if (typeof record['respect-request-headers'] === 'boolean') {
+    base.respectRequestHeaders = record['respect-request-headers'];
+  }
+
+  const policy = asRecord(record.policy);
+  if (policy) {
+    base.policyKind = parseOrchestratorPolicyKind(policy.kind);
+    const rules = asRecord(policy.rules);
+    if (rules) {
+      base.rulesDefaultsText = parseDefaultsBlockToText(rules.defaults);
+      base.rulesModelsText = parseModelsBlockToText(rules.models);
+      if (typeof rules['verifier-must-differ'] === 'boolean') {
+        base.verifierMustDiffer = rules['verifier-must-differ'];
+      }
+    }
+    const learned = asRecord(policy.learned);
+    if (learned) {
+      base.learnedSocket = typeof learned.socket === 'string' ? learned.socket : '';
+      base.learnedTimeoutMs = String(learned['timeout-ms'] ?? '');
+      base.learnedFallback = parseOrchestratorFallback(learned['fallback-on-error']);
+    }
+  }
+
+  const budgets = asRecord(record.budgets);
+  if (budgets) {
+    base.budgetMaxTurns = String(budgets['max-turns'] ?? '');
+    base.budgetWallBudgetMs = String(budgets['wall-budget-ms'] ?? '');
+    base.budgetMinVerifierTurns = String(budgets['min-verifier-turns'] ?? '');
+  }
+
+  const difficulty = asRecord(record.difficulty);
+  if (difficulty) {
+    if (typeof difficulty.enabled === 'boolean') base.difficultyEnabled = difficulty.enabled;
+    base.difficultyHardThreshold = String(difficulty['hard-token-threshold'] ?? '');
+    base.difficultyMediumThreshold = String(difficulty['medium-token-threshold'] ?? '');
+  }
+
+  const trace = asRecord(record.trace);
+  if (trace) {
+    if (typeof trace.enabled === 'boolean') base.traceEnabled = trace.enabled;
+    base.traceDir = typeof trace.dir === 'string' ? trace.dir : '';
+  }
+
+  return base;
+}
+
+function writeOrchestratorBlock(
+  doc: YamlDocument,
+  values: OrchestratorVisualConfig,
+  dirtyFields: Set<string>
+): void {
+  const root: YamlPath = ['orchestrator'];
+  const isAnyDirty = Array.from(dirtyFields).some((k) => k.startsWith('orchestrator.'));
+  const existed = docHas(doc, root);
+
+  // Skip the whole block when no user changes have been made and the
+  // YAML didn't already contain it, to avoid leaking the section into
+  // unrelated saves.
+  if (!isAnyDirty && !existed) return;
+
+  ensureMapInDoc(doc, root);
+
+  doc.setIn([...root, 'enabled'], values.enabled);
+  doc.setIn([...root, 'mode'], values.mode);
+
+  const apiKeys = values.enabledForApiKeysText
+    .split('\n')
+    .map((k) => k.trim())
+    .filter(Boolean);
+  if (apiKeys.length > 0) {
+    doc.setIn([...root, 'enabled-for-api-keys'], apiKeys);
+  } else if (docHas(doc, [...root, 'enabled-for-api-keys'])) {
+    doc.deleteIn([...root, 'enabled-for-api-keys']);
+  }
+  doc.setIn([...root, 'respect-request-headers'], values.respectRequestHeaders);
+
+  ensureMapInDoc(doc, [...root, 'policy']);
+  doc.setIn([...root, 'policy', 'kind'], values.policyKind);
+
+  ensureMapInDoc(doc, [...root, 'policy', 'rules']);
+  const defaultsBlock = serializeDefaultsTextToYaml(values.rulesDefaultsText);
+  if (defaultsBlock) {
+    doc.setIn([...root, 'policy', 'rules', 'defaults'], defaultsBlock);
+  } else if (docHas(doc, [...root, 'policy', 'rules', 'defaults'])) {
+    doc.deleteIn([...root, 'policy', 'rules', 'defaults']);
+  }
+  const modelsBlock = serializeModelsTextToYaml(values.rulesModelsText);
+  if (modelsBlock) {
+    doc.setIn([...root, 'policy', 'rules', 'models'], modelsBlock);
+  } else if (docHas(doc, [...root, 'policy', 'rules', 'models'])) {
+    doc.deleteIn([...root, 'policy', 'rules', 'models']);
+  }
+  doc.setIn([...root, 'policy', 'rules', 'verifier-must-differ'], values.verifierMustDiffer);
+
+  // Only materialize the learned policy block if explicitly chosen or
+  // already present, so we don't add empty stubs to YAML files.
+  if (values.policyKind === 'learned' || docHas(doc, [...root, 'policy', 'learned'])) {
+    ensureMapInDoc(doc, [...root, 'policy', 'learned']);
+    setStringInDoc(doc, [...root, 'policy', 'learned', 'socket'], values.learnedSocket);
+    setIntFromStringInDoc(
+      doc,
+      [...root, 'policy', 'learned', 'timeout-ms'],
+      values.learnedTimeoutMs
+    );
+    doc.setIn([...root, 'policy', 'learned', 'fallback-on-error'], values.learnedFallback);
+    deleteIfMapEmpty(doc, [...root, 'policy', 'learned']);
+  }
+
+  // Budgets — only write the keys the user actually set (or that
+  // already existed), and never strip the whole block.
+  if (
+    values.budgetMaxTurns.trim() ||
+    values.budgetWallBudgetMs.trim() ||
+    values.budgetMinVerifierTurns.trim() ||
+    docHas(doc, [...root, 'budgets'])
+  ) {
+    ensureMapInDoc(doc, [...root, 'budgets']);
+    setIntFromStringInDoc(doc, [...root, 'budgets', 'max-turns'], values.budgetMaxTurns);
+    setIntFromStringInDoc(doc, [...root, 'budgets', 'wall-budget-ms'], values.budgetWallBudgetMs);
+    setIntFromStringInDoc(
+      doc,
+      [...root, 'budgets', 'min-verifier-turns'],
+      values.budgetMinVerifierTurns
+    );
+    deleteIfMapEmpty(doc, [...root, 'budgets']);
+  }
+
+  ensureMapInDoc(doc, [...root, 'difficulty']);
+  doc.setIn([...root, 'difficulty', 'enabled'], values.difficultyEnabled);
+  setIntFromStringInDoc(
+    doc,
+    [...root, 'difficulty', 'hard-token-threshold'],
+    values.difficultyHardThreshold
+  );
+  setIntFromStringInDoc(
+    doc,
+    [...root, 'difficulty', 'medium-token-threshold'],
+    values.difficultyMediumThreshold
+  );
+  deleteIfMapEmpty(doc, [...root, 'difficulty']);
+
+  ensureMapInDoc(doc, [...root, 'trace']);
+  doc.setIn([...root, 'trace', 'enabled'], values.traceEnabled);
+  setStringInDoc(doc, [...root, 'trace', 'dir'], values.traceDir);
+  deleteIfMapEmpty(doc, [...root, 'trace']);
+
+  deleteIfMapEmpty(doc, [...root, 'policy', 'rules']);
+  deleteIfMapEmpty(doc, [...root, 'policy']);
+  deleteIfMapEmpty(doc, root);
 }
 
 function arePayloadModelEntriesEqual(
@@ -524,7 +770,7 @@ type VisualConfigAction =
     }
   | {
       type: 'set_values';
-      values: Partial<VisualConfigValues>;
+      values: VisualConfigPatch;
     };
 
 function createInitialVisualConfigState(): VisualConfigState {
@@ -539,18 +785,24 @@ function createInitialVisualConfigState(): VisualConfigState {
 
 function mergeVisualConfigValues(
   currentValues: VisualConfigValues,
-  patch: Partial<VisualConfigValues>
+  patch: VisualConfigPatch
 ): VisualConfigValues {
-  const nextValues: VisualConfigValues = { ...currentValues, ...patch } as VisualConfigValues;
+  const nextValues: VisualConfigValues = {
+    ...currentValues,
+    ...patch,
+  } as VisualConfigValues;
   if (patch.streaming) {
     nextValues.streaming = { ...currentValues.streaming, ...patch.streaming };
+  }
+  if (patch.orchestrator) {
+    nextValues.orchestrator = { ...currentValues.orchestrator, ...patch.orchestrator };
   }
   return nextValues;
 }
 
 function getNextDirtyFields(
   currentDirtyFields: Set<string>,
-  patch: Partial<VisualConfigValues>,
+  patch: VisualConfigPatch,
   nextValues: VisualConfigValues,
   baselineValues: VisualConfigValues
 ): Set<string> {
@@ -736,6 +988,15 @@ function getNextDirtyFields(
     }
   }
 
+  if (patch.orchestrator) {
+    const orchPatch = patch.orchestrator;
+    for (const key of Object.keys(orchPatch) as Array<keyof typeof orchPatch>) {
+      const left = nextValues.orchestrator[key];
+      const right = baselineValues.orchestrator[key];
+      updateDirty(`orchestrator.${String(key)}`, left === right);
+    }
+  }
+
   return nextDirtyFields;
 }
 
@@ -885,6 +1146,8 @@ export function useVisualConfig() {
           bootstrapRetries: String(streaming?.['bootstrap-retries'] ?? ''),
           nonstreamKeepaliveInterval: String(parsed['nonstream-keepalive-interval'] ?? ''),
         },
+
+        orchestrator: parseOrchestratorBlock(parsed.orchestrator),
       };
 
       dispatch({ type: 'load_success', values: newValues });
@@ -1092,6 +1355,8 @@ export function useVisualConfig() {
           deleteIfMapEmpty(doc, ['payload']);
         }
 
+        writeOrchestratorBlock(doc, values.orchestrator, dirtyFields);
+
         return doc.toString({ indent: 2, lineWidth: 120, minContentWidth: 0 });
       } catch {
         return currentYaml;
@@ -1100,7 +1365,7 @@ export function useVisualConfig() {
     [dirtyFields, visualValues]
   );
 
-  const setVisualValues = useCallback((newValues: Partial<VisualConfigValues>) => {
+  const setVisualValues = useCallback((newValues: VisualConfigPatch) => {
     dispatch({ type: 'set_values', values: newValues });
   }, []);
 
