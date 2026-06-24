@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/orchestrator"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"golang.org/x/net/context"
@@ -244,6 +245,36 @@ func headersFromContext(ctx context.Context) http.Header {
 	return nil
 }
 
+// extractInboundAPIKey returns the client API key carried on an inbound
+// request, checking common header locations (Authorization Bearer,
+// x-api-key, x-goog-api-key) and falling back to the request context's
+// gin handle for query parameters. Returns the empty string when no key
+// is present — the orchestrator's allowlist check treats that as "deny".
+func extractInboundAPIKey(ctx context.Context, headers http.Header) string {
+	if headers != nil {
+		if v := strings.TrimSpace(headers.Get("x-api-key")); v != "" {
+			return v
+		}
+		if v := strings.TrimSpace(headers.Get("x-goog-api-key")); v != "" {
+			return v
+		}
+		if auth := strings.TrimSpace(headers.Get("Authorization")); auth != "" {
+			if strings.HasPrefix(auth, "Bearer ") {
+				return strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+			}
+			return auth
+		}
+	}
+	if ctx != nil {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+			if v := strings.TrimSpace(ginCtx.Query("key")); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
 func pinnedAuthIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -302,6 +333,12 @@ type BaseAPIHandler struct {
 
 	// Cfg holds the current application configuration.
 	Cfg *config.SDKConfig
+
+	// Orchestrator optionally enables Fugu-style routing on top of the
+	// existing dispatch path. A nil value disables orchestration; the
+	// gating fields on the orchestrator itself decide whether any given
+	// request is actually orchestrated.
+	Orchestrator *orchestrator.Orchestrator
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -314,10 +351,24 @@ type BaseAPIHandler struct {
 // Returns:
 //   - *BaseAPIHandler: A new API handlers instance
 func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *BaseAPIHandler {
-	return &BaseAPIHandler{
+	h := &BaseAPIHandler{
 		Cfg:         cfg,
 		AuthManager: authManager,
 	}
+	if cfg != nil && cfg.Orchestrator.Enabled {
+		orch, err := orchestrator.New(orchestrator.FromConfig(cfg.Orchestrator), authManager)
+		if err == nil {
+			h.Orchestrator = orch
+		}
+	}
+	return h
+}
+
+// SetOrchestrator overrides the orchestrator attached to the handler.
+// Passing nil disables orchestration. Useful for tests and for embedders
+// that build their own orchestrator.
+func (h *BaseAPIHandler) SetOrchestrator(o *orchestrator.Orchestrator) {
+	h.Orchestrator = o
 }
 
 // UpdateClients updates the handlers' client list and configuration.
@@ -544,6 +595,48 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if len(payload) == 0 {
 		payload = nil
 	}
+
+	// Orchestrator hook: narrow providers or run the tri-role loop.
+	if h.Orchestrator != nil {
+		hdrs := headersFromContext(ctx)
+		apiKey := extractInboundAPIKey(ctx, hdrs)
+		if h.Orchestrator.IsEnabled(apiKey, hdrs) {
+			decision := h.Orchestrator.Decide(ctx, orchestrator.DecideRequest{
+				HandlerType:     handlerType,
+				Providers:       providers,
+				NormalizedModel: normalizedModel,
+				Payload:         rawJSON,
+				Headers:         hdrs,
+				APIKey:          apiKey,
+			})
+			if decision.UseLoop {
+				res, errRun := h.Orchestrator.RunNonStream(ctx, orchestrator.RunRequest{
+					DecisionID:      decision.DecisionID,
+					Difficulty:      decision.Difficulty,
+					HandlerType:     handlerType,
+					Providers:       decision.Providers,
+					NormalizedModel: normalizedModel,
+					Payload:         rawJSON,
+					OriginalRequest: rawJSON,
+					Headers:         hdrs,
+					Alt:             alt,
+					APIKey:          apiKey,
+					Metadata:        reqMeta,
+				})
+				if errRun == nil {
+					if !PassthroughHeadersEnabled(h.Cfg) {
+						return res.Payload, nil, nil
+					}
+					return res.Payload, FilterUpstreamHeaders(res.Headers), nil
+				}
+				// On orchestrator error, fall through to single-shot.
+			}
+			if len(decision.Providers) > 0 {
+				providers = decision.Providers
+			}
+		}
+	}
+
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: payload,
@@ -644,6 +737,78 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	if len(payload) == 0 {
 		payload = nil
 	}
+
+	// Orchestrator hook: narrow providers or run the tri-role loop.
+	if h.Orchestrator != nil {
+		hdrs := headersFromContext(ctx)
+		apiKey := extractInboundAPIKey(ctx, hdrs)
+		if h.Orchestrator.IsEnabled(apiKey, hdrs) {
+			decision := h.Orchestrator.Decide(ctx, orchestrator.DecideRequest{
+				HandlerType:     handlerType,
+				Providers:       providers,
+				NormalizedModel: normalizedModel,
+				Payload:         rawJSON,
+				Headers:         hdrs,
+				APIKey:          apiKey,
+			})
+			if decision.UseLoop {
+				streamRes, errRun := h.Orchestrator.RunStream(ctx, orchestrator.RunRequest{
+					DecisionID:      decision.DecisionID,
+					Difficulty:      decision.Difficulty,
+					HandlerType:     handlerType,
+					Providers:       decision.Providers,
+					NormalizedModel: normalizedModel,
+					Payload:         rawJSON,
+					OriginalRequest: rawJSON,
+					Headers:         hdrs,
+					Alt:             alt,
+					APIKey:          apiKey,
+					Metadata:        reqMeta,
+				})
+				if errRun == nil {
+					dataCh := make(chan []byte)
+					errCh := make(chan *interfaces.ErrorMessage, 1)
+					go func() {
+						defer close(dataCh)
+						defer close(errCh)
+						for {
+							select {
+							case <-ctx.Done():
+								return
+							case chunk, ok := <-streamRes.Chunks:
+								if !ok {
+									return
+								}
+								select {
+								case <-ctx.Done():
+									return
+								case dataCh <- chunk:
+								}
+							case err, ok := <-streamRes.Errors:
+								if !ok || err == nil {
+									continue
+								}
+								errCh <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+								return
+							}
+						}
+					}()
+					hdrsOut := streamRes.Headers
+					if PassthroughHeadersEnabled(h.Cfg) {
+						hdrsOut = FilterUpstreamHeaders(hdrsOut)
+					} else {
+						hdrsOut = nil
+					}
+					return dataCh, hdrsOut, errCh
+				}
+				// On orchestrator error, fall through to single-shot stream.
+			}
+			if len(decision.Providers) > 0 {
+				providers = decision.Providers
+			}
+		}
+	}
+
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: payload,
