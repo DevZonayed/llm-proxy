@@ -31,6 +31,9 @@ func FromConfig(in sdkconfig.OrchestratorConfig) Config {
 	if in.Policy.Rules.Defaults != nil {
 		c.Policy.Rules.Defaults = cloneDefaults(in.Policy.Rules.Defaults)
 	}
+	if in.Policy.Rules.Models != nil {
+		c.Policy.Rules.Models = cloneModels(in.Policy.Rules.Models)
+	}
 	c.Policy.Rules.VerifierMustDiffer = in.Policy.Rules.VerifierMustDiffer
 
 	if in.Policy.Learned.Socket != "" {
@@ -90,6 +93,17 @@ func cloneDefaults(in map[string][]string) map[string][]string {
 	out := make(map[string][]string, len(in))
 	for k, v := range in {
 		out[k] = append([]string(nil), v...)
+	}
+	return out
+}
+
+func cloneModels(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
 	}
 	return out
 }

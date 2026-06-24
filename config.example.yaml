@@ -417,7 +417,7 @@ nonstream-keepalive-interval: 0
 #     kind: "rules"                 # rules | learned
 #     rules:
 #       # Order each list by preference. The rules policy picks the first
-#       # provider that intersects the request's candidate set. The keys
+#       # PROVIDER that intersects the request's candidate set. The keys
 #       # ("code", "math", "recall", "thinker", "verifier") are
 #       # case-sensitive; any provider key the proxy already knows works.
 #       defaults:
@@ -426,6 +426,22 @@ nonstream-keepalive-interval: 0
 #         recall: ["gemini-cli", "vertex"]
 #         thinker: ["gemini-cli"]
 #         verifier: ["codex"]
+#       # Pin the upstream MODEL for a given role/family. Resolution
+#       # order at runtime: role-key (thinker|verifier) → family-key
+#       # (code|math|recall|general) → "default" → the user's requested
+#       # model. Blank entries are ignored. Each pinned model must be
+#       # servable by at least one provider listed in the matching
+#       # 'defaults' entry above.
+#       #
+#       # Worked example for "gemini-flash plans, claude-opus codes,
+#       # gpt-5 verifies":
+#       models:
+#         thinker: "gemini-2.5-flash"
+#         verifier: "gpt-5"
+#         code: "claude-opus-4-5-20251101"
+#         math: "gpt-5"
+#         recall: "gemini-2.5-pro"
+#         default: "gemini-2.5-pro"   # fallback for single-shot mode
 #       verifier-must-differ: true
 #     learned:
 #       socket: "/var/run/llm-proxy/fugu.sock"

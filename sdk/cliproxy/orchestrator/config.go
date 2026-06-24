@@ -58,11 +58,25 @@ type PolicyConfig struct {
 
 // RulesConfig configures the rules-based default policy.
 type RulesConfig struct {
-	// Defaults maps a coarse task family ("code", "math", "recall") to
-	// ordered provider candidate lists. The rules policy picks the first
-	// provider that intersects the request's available candidate set.
-	// Missing keys fall back to the candidate set's first entry.
+	// Defaults maps a coarse task family or role to ordered provider
+	// candidate lists. Keys may be a family ("code", "math", "recall")
+	// or a role ("thinker", "verifier"). The rules policy picks the
+	// first provider that intersects the request's available candidate
+	// set. Missing keys fall back to the candidate set's first entry.
 	Defaults map[string][]string
+
+	// Models pins the upstream model name used for a given family or
+	// role. Keys mirror Defaults ("code", "math", "recall", "thinker",
+	// "verifier", or a request-domain key). When a matching entry
+	// exists, the rules policy emits it as Action.Model; otherwise the
+	// orchestrator falls back to the user's requested model name. This
+	// is the seam for "use gemini-2.5-flash as the Thinker, claude-opus
+	// as the Worker on code tasks, gpt-5 as the Verifier".
+	//
+	// A pinned model must be servable by at least one provider in the
+	// matching Defaults entry; otherwise the dispatch layer will error
+	// when it tries to send the request.
+	Models map[string]string
 
 	// VerifierMustDiffer asks the policy to choose a Verifier provider
 	// different from the last Worker provider when possible.

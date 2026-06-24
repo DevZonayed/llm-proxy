@@ -1,6 +1,6 @@
 # Project State — CLIProxyAPI / llm-proxy
 
-Last updated: 2026-06-24
+Last updated: 2026-06-24 (post-PR #1 follow-up)
 
 ## What this project is
 Go-based proxy (CLIProxyAPI fork) that exposes OpenAI/Gemini/Claude/Codex-compatible
@@ -9,13 +9,34 @@ static model aliasing, OpenAI-compatible upstreams, Amp CLI support, embeddable 
 
 ## Active design thread: Fugu-style orchestrator
 - Source: Sakana_Fugu_Report.docx at repo root (June 23, 2026 research report).
-- Goal: add a TRINITY-style coordinator layer that picks WHICH provider family
-  serves each request, with optional tri-role (Thinker/Worker/Verifier) loop on
-  hard tasks. Account selection within a family stays unchanged.
-- Design doc: `docs/fugu-orchestrator-design.md` (v0 spec, no code yet).
+- Goal: TRINITY-style coordinator that picks WHICH provider AND which upstream
+  MODEL serves each request, with optional tri-role
+  (Thinker/Worker/Verifier) loop on hard tasks. Account selection within a
+  family stays unchanged.
+- Design doc: `docs/fugu-orchestrator-design.md`.
+- Implementation: `sdk/cliproxy/orchestrator/` (shipped on PR #1).
 - Scope: v0 = single-shot + tri-role with rules-based policy + trace recorder
-  + sidecar stub for learned policy. v1 = Conductor/DAG workflows + trained head.
-- Status: design spec written; awaiting user review.
+  + sidecar stub for learned policy + per-role/family model pinning. v1 =
+  Conductor/DAG workflows + trained head.
+- Status: v0 on branch `mochi/nara/https-github-com-berriai-litellm`. Reviewer
+  must run `go build ./...` and `go test ./sdk/cliproxy/orchestrator/...`
+  (Go was not installed on the authoring machine).
+
+## Per-task / per-role model pinning (how to configure)
+- "Master" config surface is the YAML at the proxy root
+  (`config.yaml` / `config.example.yaml`). The watcher hot-reloads it; there
+  is no live Management API endpoint to edit orchestrator config in v0.
+- **Provider** preference per role/family:
+  `orchestrator.policy.rules.defaults` — map of family/role key →
+  ordered provider list. Familiar form.
+- **Model** pinning per role/family:
+  `orchestrator.policy.rules.models` — map of family/role key →
+  upstream model string. Resolution order: role-key
+  (thinker|verifier) → family-key (code|math|recall|general) →
+  "default" → the user's requested model. Blank entries are ignored.
+- Worked example "gemini-flash plans, claude-opus codes, gpt-5 verifies"
+  lives in `config.example.yaml` (commented block) and in §7 of the
+  design doc.
 - Open threads (from §14 of the design doc):
   1. Streaming-after-ACCEPT strategy: (A) re-issue Worker as stream
      [default] vs. (B) buffer-and-flush.
@@ -52,7 +73,10 @@ static model aliasing, OpenAI-compatible upstreams, Amp CLI support, embeddable 
   rewrite Selector for the orchestrator.
 
 ## Not yet decided / not yet built
-- Implementation (this iteration was design-only by user choice).
 - Training pipeline for the learned head (sep-CMA-ES). v0 ships trace format
   and sidecar wire protocol; training is a separate Python workstream.
 - Per-tenant policies (one global policy in v0).
+- Live Management API endpoint for orchestrator config (currently YAML-only).
+- Validation that a pinned model is actually servable by at least one
+  provider in the matching `defaults` list — today this is enforced by the
+  dispatch layer at request time (request will error if unservable).

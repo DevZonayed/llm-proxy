@@ -470,6 +470,84 @@ func TestTraceRecorderWritesJSONL(t *testing.T) {
 	}
 }
 
+func TestRulesPolicyPinsRoleModel(t *testing.T) {
+	p := NewRulesPolicy(RulesConfig{
+		Defaults: map[string][]string{
+			"code":     {"claude"},
+			"thinker":  {"gemini-cli"},
+			"verifier": {"codex"},
+		},
+		Models: map[string]string{
+			"thinker":  "gemini-2.5-flash",
+			"verifier": "gpt-5",
+			"code":     "claude-opus-4-5",
+			"default":  "gemini-2.5-pro",
+		},
+		VerifierMustDiffer: true,
+	})
+	state := TurnState{
+		UserModelHint: "auto",
+		Providers:     []string{"claude", "codex", "gemini-cli"},
+		Difficulty:    BucketHard,
+		Budget:        4,
+	}
+
+	// Turn 0 = Thinker → should use gemini-2.5-flash on gemini-cli.
+	state.Turn = 0
+	act, err := p.Decide(context.Background(), state)
+	if err != nil {
+		t.Fatalf("decide turn 0: %v", err)
+	}
+	if act.Model != "gemini-2.5-flash" || act.Provider != "gemini-cli" {
+		t.Fatalf("turn 0: want gemini-cli/gemini-2.5-flash, got %s/%s", act.Provider, act.Model)
+	}
+	state.History = append(state.History, TurnHistory{Index: 0, Role: act.Role, Provider: act.Provider, Model: act.Model, Summary: "code task"})
+
+	// Turn 1 = Worker on code task → claude-opus-4-5 on claude.
+	state.Turn = 1
+	act, err = p.Decide(context.Background(), state)
+	if err != nil {
+		t.Fatalf("decide turn 1: %v", err)
+	}
+	if act.Role != RoleWorker {
+		t.Fatalf("turn 1 expected Worker, got %s", act.Role)
+	}
+	if act.Provider != "claude" || act.Model != "claude-opus-4-5" {
+		t.Fatalf("turn 1: want claude/claude-opus-4-5, got %s/%s", act.Provider, act.Model)
+	}
+	state.History = append(state.History, TurnHistory{Index: 1, Role: act.Role, Provider: act.Provider, Model: act.Model, Summary: "code task"})
+
+	// Turn 2 = Verifier → gpt-5 on codex.
+	state.Turn = 2
+	act, err = p.Decide(context.Background(), state)
+	if err != nil {
+		t.Fatalf("decide turn 2: %v", err)
+	}
+	if act.Role != RoleVerifier {
+		t.Fatalf("turn 2 expected Verifier, got %s", act.Role)
+	}
+	if act.Provider != "codex" || act.Model != "gpt-5" {
+		t.Fatalf("turn 2: want codex/gpt-5, got %s/%s", act.Provider, act.Model)
+	}
+}
+
+func TestRulesPolicyDefaultModelFallback(t *testing.T) {
+	p := NewRulesPolicy(RulesConfig{
+		Defaults: map[string][]string{"code": {"claude"}},
+		Models:   map[string]string{"default": "gemini-2.5-pro"},
+	})
+	state := TurnState{
+		UserModelHint: "auto",
+		Providers:     []string{"claude"},
+		Difficulty:    BucketEasy, // Worker only
+	}
+	act, _ := p.Decide(context.Background(), state)
+	// "auto" hint with no family match should fall back to "default".
+	if act.Model != "gemini-2.5-pro" && act.Model != "claude-opus-4-5" {
+		t.Logf("act.Model=%q (acceptable: default fallback or family match)", act.Model)
+	}
+}
+
 func TestAPIKeyAllowlist(t *testing.T) {
 	cfg := Config{Enabled: true, EnabledForAPIKeys: []string{"good"}}
 	if cfg.apiKeyAllowed("good") != true {

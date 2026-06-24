@@ -29,21 +29,62 @@ func (p *RulesPolicy) Decide(ctx context.Context, state TurnState) (Action, erro
 	}
 
 	role := p.roleForTurn(state)
+	family := classifyDomain(state)
 
 	// Build the preferred provider list for this turn.
-	preferred := p.preferredProvidersFor(role, state)
+	preferred := p.preferredProvidersFor(role, family, state)
 
 	provider := pickFirstAvailable(preferred, state.Providers)
 	if provider == "" {
 		provider = state.Providers[0]
 	}
 
+	model := p.modelFor(role, family, state.UserModelHint)
+
 	return Action{
 		Provider: provider,
-		Model:    state.UserModelHint,
+		Model:    model,
 		Role:     role,
 		Halt:     false,
 	}, nil
+}
+
+// modelFor picks the upstream model name for an outbound role turn. It
+// consults p.cfg.Models in this order:
+//
+//  1. The role-specific key ("thinker", "verifier"). This is the right
+//     place to pin a cheap planner or a strong reviewer.
+//  2. The Worker's domain-family key ("code", "math", "recall",
+//     "general"). This is where you say "for code tasks always use
+//     claude-opus-4.5".
+//  3. The user's original request model hint.
+//
+// A blank entry in the map is treated as "no override" so users can
+// stub keys without resetting them.
+func (p *RulesPolicy) modelFor(role Role, family, userHint string) string {
+	if p == nil || p.cfg.Models == nil {
+		return userHint
+	}
+	switch role {
+	case RoleThinker:
+		if m := strings.TrimSpace(p.cfg.Models["thinker"]); m != "" {
+			return m
+		}
+	case RoleVerifier:
+		if m := strings.TrimSpace(p.cfg.Models["verifier"]); m != "" {
+			return m
+		}
+	}
+	// For Worker (and as fallback for other roles), use family-keyed
+	// model when present.
+	if m := strings.TrimSpace(p.cfg.Models[family]); m != "" {
+		return m
+	}
+	// Generic catch-all under the "default" key.
+	if m := strings.TrimSpace(p.cfg.Models["default"]); m != "" {
+		return m
+	}
+	return userHint
 }
 
 // roleForTurn picks the role assignment for a turn based on its index and
@@ -79,10 +120,8 @@ func (p *RulesPolicy) roleForTurn(state TurnState) Role {
 
 // preferredProvidersFor returns the ordered list of provider candidates
 // the policy would like to use for the next turn, in decreasing order of
-// preference.
-func (p *RulesPolicy) preferredProvidersFor(role Role, state TurnState) []string {
-	family := classifyDomain(state)
-
+// preference. family is the domain classification (see classifyDomain).
+func (p *RulesPolicy) preferredProvidersFor(role Role, family string, state TurnState) []string {
 	switch role {
 	case RoleThinker:
 		// Thinker prefers a cheap, fast family. The rules config can

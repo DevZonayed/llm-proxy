@@ -52,9 +52,29 @@ type OrchestratorPolicyConfig struct {
 
 // OrchestratorRulesConfig configures the rules-based default policy.
 type OrchestratorRulesConfig struct {
-	// Defaults maps a coarse task family ("code", "math", "recall",
-	// "thinker", "verifier") to ordered provider candidate lists.
+	// Defaults maps a coarse task family or role to ordered provider
+	// candidate lists. Keys: "code", "math", "recall", "thinker",
+	// "verifier" (or "default" as catch-all). The rules policy picks
+	// the first provider that intersects the request's available
+	// candidate set.
 	Defaults map[string][]string `yaml:"defaults,omitempty" json:"defaults,omitempty"`
+
+	// Models pins the upstream model name for a given family or role.
+	// Resolution order at runtime: role-key ("thinker"|"verifier") →
+	// family-key ("code"|"math"|"recall"|"general") → "default" →
+	// the user's requested model. Blank entries are ignored so you can
+	// stub keys without overriding.
+	//
+	// Example: pin gemini-2.5-flash as the planner, claude-opus-4.5
+	// as the Worker on code tasks, gpt-5 as the Verifier:
+	//
+	//   models:
+	//     thinker: "gemini-2.5-flash"
+	//     verifier: "gpt-5"
+	//     code: "claude-opus-4.5"
+	//     math: "gpt-5"
+	//     default: "gemini-2.5-pro"
+	Models map[string]string `yaml:"models,omitempty" json:"models,omitempty"`
 
 	// VerifierMustDiffer prefers a Verifier provider different from the
 	// last Worker provider when possible.

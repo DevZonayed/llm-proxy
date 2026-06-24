@@ -382,10 +382,22 @@ orchestrator:
   policy:
     kind: "rules"                # "rules" | "learned"
     rules:
+      # Provider preferences per role/family.
       defaults:
-        code: "anthropic"
-        math: "openai"
-        recall: "google"
+        code: ["claude"]
+        math: ["codex"]
+        recall: ["gemini-cli"]
+        thinker: ["gemini-cli"]
+        verifier: ["codex"]
+      # Per-role/family upstream MODEL pinning. Resolution order at
+      # runtime: role-key (thinker|verifier) → family-key (code|math|
+      # recall|general) → "default" → the user's requested model.
+      models:
+        thinker: "gemini-2.5-flash"
+        verifier: "gpt-5"
+        code: "claude-opus-4-5-20251101"
+        math: "gpt-5"
+        default: "gemini-2.5-pro"
       verifier-must-differ: true
     learned:                     # only consulted when kind: "learned"
       socket: "/var/run/llm-proxy/fugu.sock"
