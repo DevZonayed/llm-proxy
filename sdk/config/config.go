@@ -29,6 +29,14 @@ type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
 
+type OrchestratorConfig = internalconfig.OrchestratorConfig
+type OrchestratorPolicyConfig = internalconfig.OrchestratorPolicyConfig
+type OrchestratorRulesConfig = internalconfig.OrchestratorRulesConfig
+type OrchestratorLearnedConfig = internalconfig.OrchestratorLearnedConfig
+type OrchestratorBudgetConfig = internalconfig.OrchestratorBudgetConfig
+type OrchestratorDifficultyConfig = internalconfig.OrchestratorDifficultyConfig
+type OrchestratorTraceConfig = internalconfig.OrchestratorTraceConfig
+
 type TLS = internalconfig.TLSConfig
 
 const (

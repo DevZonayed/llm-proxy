@@ -400,3 +400,51 @@ nonstream-keepalive-interval: 0
 #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
 #         - "generationConfig.thinkingConfig.thinkingBudget"
 #         - "generationConfig.responseJsonSchema"
+
+# Fugu-style multi-agent orchestrator (off by default).
+# When enabled, an in-process coordinator decides which provider family
+# serves each request and, on hard tasks, optionally runs a Thinker /
+# Worker / Verifier loop before responding. Account selection within the
+# chosen provider stays in the existing round-robin / fill-first
+# Selector. See docs/fugu-orchestrator-design.md for the full design.
+# orchestrator:
+#   enabled: false
+#   mode: "auto"                    # auto | single-shot | tri-role
+#                                   # "auto" = difficulty-driven (recommended).
+#   enabled-for-api-keys: []        # ["*"] = all keys; empty = none.
+#   respect-request-headers: true   # honor X-Orchestrator and X-Orchestrator-Mode.
+#   policy:
+#     kind: "rules"                 # rules | learned
+#     rules:
+#       # Order each list by preference. The rules policy picks the first
+#       # provider that intersects the request's candidate set. The keys
+#       # ("code", "math", "recall", "thinker", "verifier") are
+#       # case-sensitive; any provider key the proxy already knows works.
+#       defaults:
+#         code: ["claude", "antigravity"]
+#         math: ["codex", "openai-compatibility"]
+#         recall: ["gemini-cli", "vertex"]
+#         thinker: ["gemini-cli"]
+#         verifier: ["codex"]
+#       verifier-must-differ: true
+#     learned:
+#       socket: "/var/run/llm-proxy/fugu.sock"
+#       timeout-ms: 50
+#       fallback-on-error: "rules"  # rules | fail
+#   budgets:
+#     max-turns: 4
+#     wall-budget-ms: 60000
+#     min-verifier-turns: 1
+#     escalate-on-verifier-revise: 1
+#     single-shot-fallback-ms: 10000
+#   difficulty:
+#     enabled: true
+#     hard-token-threshold: 2500
+#     medium-token-threshold: 500
+#     promote-on-tools: false
+#   trace:
+#     enabled: true
+#     dir: "~/.cli-proxy-api/orchestrator-traces"
+#     keep-worker-excerpts-chars: 256
+#     keep-full-worker-payloads: false  # privacy-sensitive — opt-in
+#     rotate-mb: 64
