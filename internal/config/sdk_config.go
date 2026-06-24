@@ -44,6 +44,11 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// Orchestrator configures the Fugu-style multi-agent router. The
+	// orchestrator is off by default; when disabled the server behaves
+	// identically to releases prior to this feature.
+	Orchestrator OrchestratorConfig `yaml:"orchestrator,omitempty" json:"orchestrator,omitempty"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

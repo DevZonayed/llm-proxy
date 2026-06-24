@@ -16,6 +16,7 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
+  IconBot,
   IconCode,
   IconDiamond,
   IconKey,
@@ -33,6 +34,7 @@ import type {
   PayloadParamValidationErrorCode,
   PayloadRule,
   VisualConfigFieldPath,
+  VisualConfigPatch,
   VisualConfigValidationErrorCode,
   VisualConfigValidationErrors,
   VisualConfigValues,
@@ -53,7 +55,8 @@ type VisualSectionId =
   | 'network'
   | 'quota'
   | 'streaming'
-  | 'payload';
+  | 'payload'
+  | 'orchestrator';
 
 type VisualSection = {
   id: VisualSectionId;
@@ -68,7 +71,7 @@ interface VisualConfigEditorProps {
   validationErrors?: VisualConfigValidationErrors;
   hasPayloadValidationErrors?: boolean;
   disabled?: boolean;
-  onChange: (values: Partial<VisualConfigValues>) => void;
+  onChange: (values: VisualConfigPatch) => void;
 }
 
 function getValidationMessage(
@@ -321,6 +324,18 @@ export function VisualConfigEditor({
         description: t('config_management.visual.sections.payload.description'),
         icon: IconCode,
         errorCount: hasPayloadValidationErrors ? 1 : 0,
+      },
+      {
+        id: 'orchestrator',
+        title: t('config_management.visual.sections.orchestrator.title', {
+          defaultValue: 'Orchestrator',
+        }),
+        description: t('config_management.visual.sections.orchestrator.description', {
+          defaultValue:
+            'Per-task / per-role provider and model routing. Off by default; tune from here or edit the source for advanced fields.',
+        }),
+        icon: IconBot,
+        errorCount: 0,
       },
     ],
     [countErrors, hasPayloadValidationErrors, t]
@@ -1128,6 +1143,387 @@ export function VisualConfigEditor({
                   onChange={handlePayloadFilterRulesChange}
                 />
               </SectionSubsection>
+            </SectionStack>
+          </ConfigSection>
+
+          <ConfigSection
+            id="orchestrator"
+            ref={(node) => {
+              sectionRefs.current.orchestrator = node;
+            }}
+            indexLabel="10"
+            icon={<IconBot size={16} />}
+            title={t('config_management.visual.sections.orchestrator.title', {
+              defaultValue: 'Orchestrator',
+            })}
+            description={t('config_management.visual.sections.orchestrator.description', {
+              defaultValue:
+                'Per-task / per-role provider and model routing. Off by default; tune from here or edit the source for advanced fields.',
+            })}
+          >
+            <SectionStack>
+              <SectionGrid>
+                <ToggleRow
+                  title={t('config_management.visual.sections.orchestrator.enabled', {
+                    defaultValue: 'Enable orchestrator',
+                  })}
+                  description={t('config_management.visual.sections.orchestrator.enabled_desc', {
+                    defaultValue:
+                      'When off, the proxy behaves identically to releases prior to this feature.',
+                  })}
+                  checked={values.orchestrator.enabled}
+                  disabled={disabled}
+                  onChange={(enabled) => onChange({ orchestrator: { enabled } })}
+                />
+                <ToggleRow
+                  title={t('config_management.visual.sections.orchestrator.respect_headers', {
+                    defaultValue: 'Respect request headers',
+                  })}
+                  description={t(
+                    'config_management.visual.sections.orchestrator.respect_headers_desc',
+                    {
+                      defaultValue:
+                        'Honor X-Orchestrator and X-Orchestrator-Mode overrides on inbound requests.',
+                    }
+                  )}
+                  checked={values.orchestrator.respectRequestHeaders}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  onChange={(respectRequestHeaders) =>
+                    onChange({ orchestrator: { respectRequestHeaders } })
+                  }
+                />
+              </SectionGrid>
+
+              <SectionGrid>
+                <FieldShell
+                  label={t('config_management.visual.sections.orchestrator.mode', {
+                    defaultValue: 'Mode',
+                  })}
+                  hint={t('config_management.visual.sections.orchestrator.mode_hint', {
+                    defaultValue:
+                      'auto: difficulty-driven. single-shot: always one call. tri-role: Thinker → Worker → Verifier loop.',
+                  })}
+                >
+                  <Select
+                    value={values.orchestrator.mode}
+                    options={[
+                      { value: 'auto', label: 'auto' },
+                      { value: 'single-shot', label: 'single-shot' },
+                      { value: 'tri-role', label: 'tri-role' },
+                    ]}
+                    disabled={disabled || !values.orchestrator.enabled}
+                    onChange={(nextValue) =>
+                      onChange({
+                        orchestrator: {
+                          mode: nextValue as VisualConfigValues['orchestrator']['mode'],
+                        },
+                      })
+                    }
+                  />
+                </FieldShell>
+                <FieldShell
+                  label={t('config_management.visual.sections.orchestrator.policy_kind', {
+                    defaultValue: 'Policy',
+                  })}
+                  hint={t('config_management.visual.sections.orchestrator.policy_kind_hint', {
+                    defaultValue:
+                      'rules: ships with v0. learned: forwards each turn to a Unix-socket sidecar.',
+                  })}
+                >
+                  <Select
+                    value={values.orchestrator.policyKind}
+                    options={[
+                      { value: 'rules', label: 'rules' },
+                      { value: 'learned', label: 'learned' },
+                    ]}
+                    disabled={disabled || !values.orchestrator.enabled}
+                    onChange={(nextValue) =>
+                      onChange({
+                        orchestrator: {
+                          policyKind: nextValue as VisualConfigValues['orchestrator']['policyKind'],
+                        },
+                      })
+                    }
+                  />
+                </FieldShell>
+              </SectionGrid>
+
+              <FieldShell
+                label={t('config_management.visual.sections.orchestrator.api_keys_label', {
+                  defaultValue: 'Enabled for API keys (one per line, or "*")',
+                })}
+                hint={t('config_management.visual.sections.orchestrator.api_keys_hint', {
+                  defaultValue:
+                    'Empty disables the orchestrator for every key, even when "Enable" is on.',
+                })}
+              >
+                <textarea
+                  className="input"
+                  rows={3}
+                  value={values.orchestrator.enabledForApiKeysText}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  placeholder={'*'}
+                  onChange={(e) =>
+                    onChange({ orchestrator: { enabledForApiKeysText: e.target.value } })
+                  }
+                />
+              </FieldShell>
+
+              <SectionSubsection
+                title={t('config_management.visual.sections.orchestrator.providers_title', {
+                  defaultValue: 'Providers per role / family',
+                })}
+                description={t(
+                  'config_management.visual.sections.orchestrator.providers_desc',
+                  {
+                    defaultValue:
+                      'One "key: provider1, provider2, …" entry per line. Keys: thinker, verifier, code, math, recall, general.',
+                  }
+                )}
+              >
+                <textarea
+                  className="input"
+                  rows={6}
+                  value={values.orchestrator.rulesDefaultsText}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  placeholder={
+                    'code: claude\nmath: codex\nrecall: gemini-cli\nthinker: gemini-cli\nverifier: codex'
+                  }
+                  onChange={(e) =>
+                    onChange({ orchestrator: { rulesDefaultsText: e.target.value } })
+                  }
+                />
+              </SectionSubsection>
+
+              <SectionSubsection
+                title={t('config_management.visual.sections.orchestrator.models_title', {
+                  defaultValue: 'Model pinning per role / family',
+                })}
+                description={t('config_management.visual.sections.orchestrator.models_desc', {
+                  defaultValue:
+                    'One "key: model-name" entry per line. Resolution at runtime: role-key → family-key → "default" → user\'s requested model. Each pinned model must be servable by at least one provider in the matching providers list above.',
+                })}
+              >
+                <textarea
+                  className="input"
+                  rows={6}
+                  value={values.orchestrator.rulesModelsText}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  placeholder={
+                    'thinker: gemini-2.5-flash\nverifier: gpt-5\ncode: claude-opus-4-5-20251101\nmath: gpt-5\ndefault: gemini-2.5-pro'
+                  }
+                  onChange={(e) =>
+                    onChange({ orchestrator: { rulesModelsText: e.target.value } })
+                  }
+                />
+              </SectionSubsection>
+
+              <SectionGrid>
+                <ToggleRow
+                  title={t('config_management.visual.sections.orchestrator.verifier_must_differ', {
+                    defaultValue: 'Verifier must differ from last Worker',
+                  })}
+                  description={t(
+                    'config_management.visual.sections.orchestrator.verifier_must_differ_desc',
+                    {
+                      defaultValue:
+                        'Prefer a Verifier provider distinct from the last Worker to reduce same-model bias.',
+                    }
+                  )}
+                  checked={values.orchestrator.verifierMustDiffer}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  onChange={(verifierMustDiffer) =>
+                    onChange({ orchestrator: { verifierMustDiffer } })
+                  }
+                />
+                <ToggleRow
+                  title={t('config_management.visual.sections.orchestrator.difficulty_enabled', {
+                    defaultValue: 'Difficulty classifier',
+                  })}
+                  description={t(
+                    'config_management.visual.sections.orchestrator.difficulty_enabled_desc',
+                    {
+                      defaultValue:
+                        'Cheap pre-classifier that decides easy/medium/hard before consulting the policy.',
+                    }
+                  )}
+                  checked={values.orchestrator.difficultyEnabled}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  onChange={(difficultyEnabled) =>
+                    onChange({ orchestrator: { difficultyEnabled } })
+                  }
+                />
+              </SectionGrid>
+
+              <SectionGrid>
+                <Input
+                  label={t('config_management.visual.sections.orchestrator.budget_max_turns', {
+                    defaultValue: 'Max loop turns',
+                  })}
+                  type="number"
+                  placeholder="4"
+                  value={values.orchestrator.budgetMaxTurns}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  onChange={(e) =>
+                    onChange({ orchestrator: { budgetMaxTurns: e.target.value } })
+                  }
+                />
+                <Input
+                  label={t('config_management.visual.sections.orchestrator.budget_wall_ms', {
+                    defaultValue: 'Wall budget (ms)',
+                  })}
+                  type="number"
+                  placeholder="60000"
+                  value={values.orchestrator.budgetWallBudgetMs}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  onChange={(e) =>
+                    onChange({ orchestrator: { budgetWallBudgetMs: e.target.value } })
+                  }
+                />
+              </SectionGrid>
+
+              <SectionGrid>
+                <Input
+                  label={t('config_management.visual.sections.orchestrator.budget_min_verifier', {
+                    defaultValue: 'Min verifier turns',
+                  })}
+                  type="number"
+                  placeholder="1"
+                  value={values.orchestrator.budgetMinVerifierTurns}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  onChange={(e) =>
+                    onChange({
+                      orchestrator: { budgetMinVerifierTurns: e.target.value },
+                    })
+                  }
+                />
+                <Input
+                  label={t('config_management.visual.sections.orchestrator.difficulty_hard', {
+                    defaultValue: 'Hard threshold (tokens)',
+                  })}
+                  type="number"
+                  placeholder="2500"
+                  value={values.orchestrator.difficultyHardThreshold}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  onChange={(e) =>
+                    onChange({
+                      orchestrator: { difficultyHardThreshold: e.target.value },
+                    })
+                  }
+                />
+              </SectionGrid>
+
+              <SectionGrid>
+                <Input
+                  label={t('config_management.visual.sections.orchestrator.difficulty_medium', {
+                    defaultValue: 'Medium threshold (tokens)',
+                  })}
+                  type="number"
+                  placeholder="500"
+                  value={values.orchestrator.difficultyMediumThreshold}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  onChange={(e) =>
+                    onChange({
+                      orchestrator: { difficultyMediumThreshold: e.target.value },
+                    })
+                  }
+                />
+                <Input
+                  label={t('config_management.visual.sections.orchestrator.trace_dir', {
+                    defaultValue: 'Trace directory',
+                  })}
+                  placeholder="~/.cli-proxy-api/orchestrator-traces"
+                  value={values.orchestrator.traceDir}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  onChange={(e) => onChange({ orchestrator: { traceDir: e.target.value } })}
+                />
+              </SectionGrid>
+
+              <SectionGrid>
+                <ToggleRow
+                  title={t('config_management.visual.sections.orchestrator.trace_enabled', {
+                    defaultValue: 'Enable trace recorder',
+                  })}
+                  description={t(
+                    'config_management.visual.sections.orchestrator.trace_enabled_desc',
+                    {
+                      defaultValue:
+                        'Write one JSON line per orchestrated request to the trace directory.',
+                    }
+                  )}
+                  checked={values.orchestrator.traceEnabled}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  onChange={(traceEnabled) => onChange({ orchestrator: { traceEnabled } })}
+                />
+              </SectionGrid>
+
+              {values.orchestrator.policyKind === 'learned' ? (
+                <SectionSubsection
+                  title={t('config_management.visual.sections.orchestrator.learned_title', {
+                    defaultValue: 'Learned-policy sidecar',
+                  })}
+                  description={t(
+                    'config_management.visual.sections.orchestrator.learned_desc',
+                    {
+                      defaultValue:
+                        'Per-turn decision is delegated to a Unix-socket sidecar. Falls back to rules on timeout or error when configured.',
+                    }
+                  )}
+                >
+                  <SectionGrid>
+                    <Input
+                      label={t(
+                        'config_management.visual.sections.orchestrator.learned_socket',
+                        { defaultValue: 'Socket path' }
+                      )}
+                      placeholder="/var/run/llm-proxy/fugu.sock"
+                      value={values.orchestrator.learnedSocket}
+                      disabled={disabled || !values.orchestrator.enabled}
+                      onChange={(e) =>
+                        onChange({ orchestrator: { learnedSocket: e.target.value } })
+                      }
+                    />
+                    <Input
+                      label={t(
+                        'config_management.visual.sections.orchestrator.learned_timeout',
+                        { defaultValue: 'Timeout (ms)' }
+                      )}
+                      type="number"
+                      placeholder="50"
+                      value={values.orchestrator.learnedTimeoutMs}
+                      disabled={disabled || !values.orchestrator.enabled}
+                      onChange={(e) =>
+                        onChange({ orchestrator: { learnedTimeoutMs: e.target.value } })
+                      }
+                    />
+                  </SectionGrid>
+                  <SectionGrid>
+                    <FieldShell
+                      label={t(
+                        'config_management.visual.sections.orchestrator.learned_fallback',
+                        { defaultValue: 'On error' }
+                      )}
+                    >
+                      <Select
+                        value={values.orchestrator.learnedFallback}
+                        options={[
+                          { value: 'rules', label: 'rules (fall back)' },
+                          { value: 'fail', label: 'fail (return error)' },
+                        ]}
+                        disabled={disabled || !values.orchestrator.enabled}
+                        onChange={(nextValue) =>
+                          onChange({
+                            orchestrator: {
+                              learnedFallback:
+                                nextValue as VisualConfigValues['orchestrator']['learnedFallback'],
+                            },
+                          })
+                        }
+                      />
+                    </FieldShell>
+                  </SectionGrid>
+                </SectionSubsection>
+              ) : null}
             </SectionStack>
           </ConfigSection>
         </div>
