@@ -1,6 +1,8 @@
 import { useCallback, useMemo, useReducer } from 'react';
 import { isMap, parse as parseYaml, parseDocument } from 'yaml';
 import type {
+  CatalogEntryDraft,
+  CategoryDraft,
   PayloadFilterRule,
   PayloadParamEntry,
   PayloadParamValueType,
@@ -12,9 +14,11 @@ import type {
   OrchestratorMode,
   OrchestratorPolicyKind,
   OrchestratorLearnedFallback,
+  OrchestratorClassifierFallback,
+  OrchestratorClassifierKind,
   OrchestratorVisualConfig,
 } from '@/types/visualConfig';
-import { DEFAULT_VISUAL_VALUES } from '@/types/visualConfig';
+import { DEFAULT_VISUAL_VALUES, makeClientId } from '@/types/visualConfig';
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -298,6 +302,80 @@ function serializeModelsTextToYaml(text: string): Record<string, string> | undef
   return touched ? out : undefined;
 }
 
+function parseOrchestratorClassifierKind(value: unknown): OrchestratorClassifierKind {
+  if (
+    value === 'heuristic' ||
+    value === 'llm' ||
+    value === 'hybrid' ||
+    value === 'direct-model'
+  ) {
+    return value;
+  }
+  return '';
+}
+
+function parseOrchestratorClassifierFallback(value: unknown): OrchestratorClassifierFallback {
+  if (value === 'heuristic' || value === 'default-category' || value === 'fail') {
+    return value;
+  }
+  return '';
+}
+
+function parseCatalogEntries(value: unknown): CatalogEntryDraft[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((raw) => {
+    const record = asRecord(raw) ?? {};
+    return {
+      id: makeClientId(),
+      entryId: typeof record.id === 'string' ? record.id : '',
+      provider: typeof record.provider === 'string' ? record.provider : '',
+      model: typeof record.model === 'string' ? record.model : '',
+      tags: parseStringList(record.tags),
+      description: typeof record.description === 'string' ? record.description : '',
+      instructions: typeof record.instructions === 'string' ? record.instructions : '',
+      roles: parseStringList(record.roles),
+      costTier: typeof record['cost-tier'] === 'string' ? record['cost-tier'] : '',
+      latencyTier: typeof record['latency-tier'] === 'string' ? record['latency-tier'] : '',
+      contextWindow:
+        typeof record['context-window'] === 'number'
+          ? String(record['context-window'])
+          : typeof record['context-window'] === 'string'
+            ? record['context-window']
+            : '',
+      supports: parseStringList(record.supports),
+    };
+  });
+}
+
+function parseCategoryEntries(value: unknown): CategoryDraft[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((raw) => {
+    const record = asRecord(raw) ?? {};
+    const match = asRecord(record.match) ?? {};
+    const rolePins = asRecord(record['role-pins']) ?? {};
+    const pickString = (v: unknown): string => (typeof v === 'string' ? v : '');
+    return {
+      id: makeClientId(),
+      name: pickString(record.name),
+      instructions: pickString(record.instructions),
+      matchKeywords: parseStringList(match.keywords),
+      matchRegex: parseStringList(match.regex),
+      matchRequireCodeBlock: Boolean(match['require-code-block']),
+      matchMinTokens:
+        typeof match['min-tokens'] === 'number' ? String(match['min-tokens']) : '',
+      matchMaxTokens:
+        typeof match['max-tokens'] === 'number' ? String(match['max-tokens']) : '',
+      matchRequireTools: Boolean(match['require-tools']),
+      matchAnyOf: parseStringList(match['any-of']),
+      matchNoneOf: parseStringList(match['none-of']),
+      prefer: parseStringList(record.prefer),
+      rolePinThinker: pickString(rolePins.thinker),
+      rolePinWorker: pickString(rolePins.worker),
+      rolePinVerifier: pickString(rolePins.verifier),
+    };
+  });
+}
+
 function parseOrchestratorBlock(value: unknown): OrchestratorVisualConfig {
   const base = deepClone(DEFAULT_VISUAL_VALUES.orchestrator);
   const record = asRecord(value);
@@ -349,7 +427,133 @@ function parseOrchestratorBlock(value: unknown): OrchestratorVisualConfig {
     base.traceDir = typeof trace.dir === 'string' ? trace.dir : '';
   }
 
+  base.catalog = parseCatalogEntries(record.catalog);
+  base.categories = parseCategoryEntries(record.categories);
+
+  const classifier = asRecord(record.classifier);
+  if (classifier) {
+    base.classifierKind = parseOrchestratorClassifierKind(classifier.kind);
+    const heuristic = asRecord(classifier.heuristic);
+    if (heuristic && typeof heuristic['first-match-wins'] === 'boolean') {
+      base.classifierFirstMatchWins = heuristic['first-match-wins'];
+    }
+    const llm = asRecord(classifier.llm);
+    if (llm) {
+      if (typeof llm.enabled === 'boolean') base.classifierLlmEnabled = llm.enabled;
+      base.classifierLlmProvider =
+        typeof llm.provider === 'string' ? llm.provider : '';
+      base.classifierLlmModel = typeof llm.model === 'string' ? llm.model : '';
+      base.classifierLlmTimeoutMs =
+        typeof llm['timeout-ms'] === 'number' ? String(llm['timeout-ms']) : '';
+      base.classifierLlmCacheTtlSeconds =
+        typeof llm['cache-ttl-seconds'] === 'number'
+          ? String(llm['cache-ttl-seconds'])
+          : '';
+      base.classifierLlmMaxInputChars =
+        typeof llm['max-input-chars'] === 'number'
+          ? String(llm['max-input-chars'])
+          : '';
+      base.classifierLlmPromptTemplate =
+        typeof llm['prompt-template'] === 'string' ? llm['prompt-template'] : '';
+      base.classifierLlmFallbackOnError = parseOrchestratorClassifierFallback(
+        llm['fallback-on-error']
+      );
+      base.classifierLlmDefaultCategory =
+        typeof llm['default-category'] === 'string' ? llm['default-category'] : '';
+    }
+  }
+
   return base;
+}
+
+/** Normalize a free-form list for YAML output: trim entries, drop blanks. */
+function compactStringList(list: string[]): string[] {
+  return list.map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Map a CatalogEntryDraft back to its YAML record shape. Entries with
+ * neither provider nor model are dropped — they're partially-edited UI
+ * rows the user never finished. Entries with both fields are emitted
+ * with optional keys included only when they carry user-entered data.
+ */
+function serializeCatalogEntries(
+  entries: CatalogEntryDraft[]
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const entry of entries) {
+    const provider = entry.provider.trim();
+    const model = entry.model.trim();
+    if (!provider && !model) continue;
+    const row: Record<string, unknown> = {};
+    if (entry.entryId.trim()) row.id = entry.entryId.trim();
+    if (provider) row.provider = provider;
+    if (model) row.model = model;
+    const tags = compactStringList(entry.tags);
+    if (tags.length) row.tags = tags;
+    if (entry.description.trim()) row.description = entry.description;
+    if (entry.instructions.trim()) row.instructions = entry.instructions;
+    const roles = compactStringList(entry.roles);
+    if (roles.length) row.roles = roles;
+    if (entry.costTier.trim()) row['cost-tier'] = entry.costTier.trim();
+    if (entry.latencyTier.trim()) row['latency-tier'] = entry.latencyTier.trim();
+    const ctxStr = entry.contextWindow.trim();
+    if (ctxStr && /^\d+$/.test(ctxStr)) {
+      const n = Number(ctxStr);
+      if (Number.isFinite(n)) row['context-window'] = n;
+    }
+    const supports = compactStringList(entry.supports);
+    if (supports.length) row.supports = supports;
+    out.push(row);
+  }
+  return out;
+}
+
+/**
+ * Map a CategoryDraft back to its YAML record shape. Entries with no
+ * `name` are dropped (partially-edited UI rows). match.* and role-pins
+ * are only included when they contain user-entered data — empty maps
+ * keep the YAML clean.
+ */
+function serializeCategoryEntries(
+  entries: CategoryDraft[]
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const entry of entries) {
+    const name = entry.name.trim();
+    if (!name) continue;
+    const row: Record<string, unknown> = { name };
+    if (entry.instructions.trim()) row.instructions = entry.instructions;
+
+    const match: Record<string, unknown> = {};
+    const keywords = compactStringList(entry.matchKeywords);
+    if (keywords.length) match.keywords = keywords;
+    const regex = compactStringList(entry.matchRegex);
+    if (regex.length) match.regex = regex;
+    if (entry.matchRequireCodeBlock) match['require-code-block'] = true;
+    const minTokens = entry.matchMinTokens.trim();
+    if (minTokens && /^\d+$/.test(minTokens)) match['min-tokens'] = Number(minTokens);
+    const maxTokens = entry.matchMaxTokens.trim();
+    if (maxTokens && /^\d+$/.test(maxTokens)) match['max-tokens'] = Number(maxTokens);
+    if (entry.matchRequireTools) match['require-tools'] = true;
+    const anyOf = compactStringList(entry.matchAnyOf);
+    if (anyOf.length) match['any-of'] = anyOf;
+    const noneOf = compactStringList(entry.matchNoneOf);
+    if (noneOf.length) match['none-of'] = noneOf;
+    if (Object.keys(match).length) row.match = match;
+
+    const prefer = compactStringList(entry.prefer);
+    if (prefer.length) row.prefer = prefer;
+
+    const rolePins: Record<string, string> = {};
+    if (entry.rolePinThinker.trim()) rolePins.thinker = entry.rolePinThinker.trim();
+    if (entry.rolePinWorker.trim()) rolePins.worker = entry.rolePinWorker.trim();
+    if (entry.rolePinVerifier.trim()) rolePins.verifier = entry.rolePinVerifier.trim();
+    if (Object.keys(rolePins).length) row['role-pins'] = rolePins;
+
+    out.push(row);
+  }
+  return out;
 }
 
 function writeOrchestratorBlock(
@@ -452,9 +656,170 @@ function writeOrchestratorBlock(
   setStringInDoc(doc, [...root, 'trace', 'dir'], values.traceDir);
   deleteIfMapEmpty(doc, [...root, 'trace']);
 
+  // v2 catalog — only materialize when the user has entries or the
+  // YAML already had a `catalog:` key. Empty arrays are dropped to
+  // keep saves from leaking the section into unrelated configs.
+  const catalogYaml = serializeCatalogEntries(values.catalog);
+  const catalogDirty = dirtyFields.has('orchestrator.catalog');
+  if (catalogYaml.length > 0) {
+    doc.setIn([...root, 'catalog'], catalogYaml);
+  } else if (catalogDirty) {
+    if (docHas(doc, [...root, 'catalog'])) doc.deleteIn([...root, 'catalog']);
+  } else if (docHas(doc, [...root, 'catalog'])) {
+    // The user didn't touch catalog — leave the existing block alone.
+  }
+
+  // v2 categories — same materialization rules as catalog.
+  const categoriesYaml = serializeCategoryEntries(values.categories);
+  const categoriesDirty = dirtyFields.has('orchestrator.categories');
+  if (categoriesYaml.length > 0) {
+    doc.setIn([...root, 'categories'], categoriesYaml);
+  } else if (categoriesDirty) {
+    if (docHas(doc, [...root, 'categories'])) doc.deleteIn([...root, 'categories']);
+  }
+
+  // v2/v2.1 classifier. Only materialize fields that have a value or
+  // already exist in the YAML, so the section is invisible until the
+  // operator opts in.
+  const classifierAnyDirty = Array.from(dirtyFields).some((k) =>
+    k.startsWith('orchestrator.classifier')
+  );
+  if (classifierAnyDirty || docHas(doc, [...root, 'classifier'])) {
+    ensureMapInDoc(doc, [...root, 'classifier']);
+    if (values.classifierKind) {
+      doc.setIn([...root, 'classifier', 'kind'], values.classifierKind);
+    } else if (docHas(doc, [...root, 'classifier', 'kind'])) {
+      doc.deleteIn([...root, 'classifier', 'kind']);
+    }
+
+    const heuristicPath = [...root, 'classifier', 'heuristic'];
+    const writeHeuristic =
+      dirtyFields.has('orchestrator.classifierFirstMatchWins') || docHas(doc, heuristicPath);
+    if (writeHeuristic) {
+      ensureMapInDoc(doc, heuristicPath);
+      doc.setIn(
+        [...heuristicPath, 'first-match-wins'],
+        values.classifierFirstMatchWins
+      );
+      deleteIfMapEmpty(doc, heuristicPath);
+    }
+
+    const llmPath = [...root, 'classifier', 'llm'];
+    const llmAnyDirty = Array.from(dirtyFields).some((k) =>
+      k.startsWith('orchestrator.classifierLlm')
+    );
+    if (llmAnyDirty || docHas(doc, llmPath)) {
+      ensureMapInDoc(doc, llmPath);
+      if (values.classifierLlmEnabled || docHas(doc, [...llmPath, 'enabled'])) {
+        doc.setIn([...llmPath, 'enabled'], values.classifierLlmEnabled);
+      }
+      setStringInDoc(doc, [...llmPath, 'provider'], values.classifierLlmProvider);
+      setStringInDoc(doc, [...llmPath, 'model'], values.classifierLlmModel);
+      setIntFromStringInDoc(doc, [...llmPath, 'timeout-ms'], values.classifierLlmTimeoutMs);
+      setIntFromStringInDoc(
+        doc,
+        [...llmPath, 'cache-ttl-seconds'],
+        values.classifierLlmCacheTtlSeconds
+      );
+      setIntFromStringInDoc(
+        doc,
+        [...llmPath, 'max-input-chars'],
+        values.classifierLlmMaxInputChars
+      );
+      setStringInDoc(
+        doc,
+        [...llmPath, 'prompt-template'],
+        values.classifierLlmPromptTemplate
+      );
+      if (values.classifierLlmFallbackOnError) {
+        doc.setIn([...llmPath, 'fallback-on-error'], values.classifierLlmFallbackOnError);
+      } else if (docHas(doc, [...llmPath, 'fallback-on-error'])) {
+        doc.deleteIn([...llmPath, 'fallback-on-error']);
+      }
+      setStringInDoc(
+        doc,
+        [...llmPath, 'default-category'],
+        values.classifierLlmDefaultCategory
+      );
+      deleteIfMapEmpty(doc, llmPath);
+    }
+
+    deleteIfMapEmpty(doc, [...root, 'classifier']);
+  }
+
   deleteIfMapEmpty(doc, [...root, 'policy', 'rules']);
   deleteIfMapEmpty(doc, [...root, 'policy']);
   deleteIfMapEmpty(doc, root);
+}
+
+function areStringArraysEqual(a: string[], b: string[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+function areCatalogEntriesEqual(a: CatalogEntryDraft[], b: CatalogEntryDraft[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (!left || !right) return false;
+    if (
+      left.entryId !== right.entryId ||
+      left.provider !== right.provider ||
+      left.model !== right.model ||
+      left.description !== right.description ||
+      left.instructions !== right.instructions ||
+      left.costTier !== right.costTier ||
+      left.latencyTier !== right.latencyTier ||
+      left.contextWindow !== right.contextWindow
+    ) {
+      return false;
+    }
+    if (
+      !areStringArraysEqual(left.tags, right.tags) ||
+      !areStringArraysEqual(left.roles, right.roles) ||
+      !areStringArraysEqual(left.supports, right.supports)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function areCategoryEntriesEqual(a: CategoryDraft[], b: CategoryDraft[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (!left || !right) return false;
+    if (
+      left.name !== right.name ||
+      left.instructions !== right.instructions ||
+      left.matchRequireCodeBlock !== right.matchRequireCodeBlock ||
+      left.matchMinTokens !== right.matchMinTokens ||
+      left.matchMaxTokens !== right.matchMaxTokens ||
+      left.matchRequireTools !== right.matchRequireTools ||
+      left.rolePinThinker !== right.rolePinThinker ||
+      left.rolePinWorker !== right.rolePinWorker ||
+      left.rolePinVerifier !== right.rolePinVerifier
+    ) {
+      return false;
+    }
+    if (
+      !areStringArraysEqual(left.matchKeywords, right.matchKeywords) ||
+      !areStringArraysEqual(left.matchRegex, right.matchRegex) ||
+      !areStringArraysEqual(left.matchAnyOf, right.matchAnyOf) ||
+      !areStringArraysEqual(left.matchNoneOf, right.matchNoneOf) ||
+      !areStringArraysEqual(left.prefer, right.prefer)
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function arePayloadModelEntriesEqual(
@@ -993,7 +1358,21 @@ function getNextDirtyFields(
     for (const key of Object.keys(orchPatch) as Array<keyof typeof orchPatch>) {
       const left = nextValues.orchestrator[key];
       const right = baselineValues.orchestrator[key];
-      updateDirty(`orchestrator.${String(key)}`, left === right);
+      let equal: boolean;
+      if (key === 'catalog') {
+        equal = areCatalogEntriesEqual(
+          left as CatalogEntryDraft[],
+          right as CatalogEntryDraft[]
+        );
+      } else if (key === 'categories') {
+        equal = areCategoryEntriesEqual(
+          left as CategoryDraft[],
+          right as CategoryDraft[]
+        );
+      } else {
+        equal = left === right;
+      }
+      updateDirty(`orchestrator.${String(key)}`, equal);
     }
   }
 

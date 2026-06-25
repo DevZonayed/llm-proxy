@@ -41,6 +41,9 @@ import type {
 } from '@/types/visualConfig';
 import {
   ApiKeysCardEditor,
+  CatalogEditor,
+  CategoriesEditor,
+  ClassifierEditor,
   PayloadFilterRulesEditor,
   PayloadRulesEditor,
 } from './VisualConfigEditorBlocks';
@@ -1456,6 +1459,54 @@ export function VisualConfigEditor({
                   onChange={(traceEnabled) => onChange({ orchestrator: { traceEnabled } })}
                 />
               </SectionGrid>
+
+              <SectionSubsection
+                title={t('config_management.visual.sections.orchestrator.catalog_title', {
+                  defaultValue: 'Catalog (v2)',
+                })}
+                description={t('config_management.visual.sections.orchestrator.catalog_desc', {
+                  defaultValue:
+                    'Knowledge base of upstream models the orchestrator can route to. Each entry pairs a provider with a model and carries optional metadata the classifier reads.',
+                })}
+              >
+                <CatalogEditor
+                  value={values.orchestrator.catalog}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  onChange={(catalog) => onChange({ orchestrator: { catalog } })}
+                />
+              </SectionSubsection>
+
+              <SectionSubsection
+                title={t('config_management.visual.sections.orchestrator.categories_title', {
+                  defaultValue: 'Categories (v2)',
+                })}
+                description={t('config_management.visual.sections.orchestrator.categories_desc', {
+                  defaultValue:
+                    'Dynamic task buckets. Each request is classified into one and routed via that category’s Prefer list of catalog ids (and optional role pins).',
+                })}
+              >
+                <CategoriesEditor
+                  value={values.orchestrator.categories}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  onChange={(categories) => onChange({ orchestrator: { categories } })}
+                />
+              </SectionSubsection>
+
+              <SectionSubsection
+                title={t('config_management.visual.sections.orchestrator.classifier_title', {
+                  defaultValue: 'Classifier (v2 / v2.1)',
+                })}
+                description={t('config_management.visual.sections.orchestrator.classifier_desc', {
+                  defaultValue:
+                    'How requests are bucketed. heuristic, llm (pick a category name), hybrid (heuristic, then LLM on miss), or direct-model (LLM picks a catalog id directly from its instructions paragraph).',
+                })}
+              >
+                <ClassifierEditor
+                  values={values.orchestrator}
+                  disabled={disabled || !values.orchestrator.enabled}
+                  onChange={(patch) => onChange({ orchestrator: patch })}
+                />
+              </SectionSubsection>
 
               {values.orchestrator.policyKind === 'learned' ? (
                 <SectionSubsection

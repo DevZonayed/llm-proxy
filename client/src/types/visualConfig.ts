@@ -55,6 +55,78 @@ export type OrchestratorMode = 'auto' | 'single-shot' | 'tri-role';
 export type OrchestratorPolicyKind = 'rules' | 'learned';
 export type OrchestratorLearnedFallback = 'rules' | 'fail';
 
+/**
+ * Orchestrator classifier strategy. Mirrors
+ * OrchestratorClassifierConfig.Kind in internal/config/orchestrator.go.
+ * Empty string means "unset" — let the orchestrator pick its default
+ * (heuristic) and avoid writing an explicit key into YAML on save.
+ */
+export type OrchestratorClassifierKind =
+  | ''
+  | 'heuristic'
+  | 'llm'
+  | 'hybrid'
+  | 'direct-model';
+
+/**
+ * Fallback strategy for the LLM classifier on error. Empty string means
+ * "unset" — the orchestrator uses its built-in default (heuristic).
+ */
+export type OrchestratorClassifierFallback =
+  | ''
+  | 'heuristic'
+  | 'default-category'
+  | 'fail';
+
+/**
+ * CatalogEntryDraft is the editor-side shape of one
+ * OrchestratorCatalogEntry from internal/config/orchestrator.go. The
+ * tags/roles/supports slices are stored as plain string arrays (one
+ * entry per chip in the UI). contextWindow is stored as a string so the
+ * editor can hold partially-typed values; a numeric parse happens at
+ * serialization time.
+ */
+export interface CatalogEntryDraft {
+  /** Stable React key — never serialized. */
+  id: string;
+  entryId: string;
+  provider: string;
+  model: string;
+  tags: string[];
+  description: string;
+  instructions: string;
+  roles: string[];
+  costTier: string;
+  latencyTier: string;
+  contextWindow: string;
+  supports: string[];
+}
+
+/**
+ * CategoryDraft is the editor-side shape of one OrchestratorCategory.
+ * The Match.* fields are flattened onto this record so the form can
+ * render them as siblings without nested object spreads. min/maxTokens
+ * are strings to support partial input.
+ */
+export interface CategoryDraft {
+  /** Stable React key — never serialized. */
+  id: string;
+  name: string;
+  instructions: string;
+  matchKeywords: string[];
+  matchRegex: string[];
+  matchRequireCodeBlock: boolean;
+  matchMinTokens: string;
+  matchMaxTokens: string;
+  matchRequireTools: boolean;
+  matchAnyOf: string[];
+  matchNoneOf: string[];
+  prefer: string[];
+  rolePinThinker: string;
+  rolePinWorker: string;
+  rolePinVerifier: string;
+}
+
 // OrchestratorVisualConfig is the subset of orchestrator settings the
 // visual editor can manage directly. Power users who need full control
 // (per-budget fields, learned-policy tweaks beyond the basics) can drop
@@ -98,6 +170,36 @@ export interface OrchestratorVisualConfig {
 
   traceEnabled: boolean;
   traceDir: string;
+
+  /**
+   * v2 catalog of upstream models the orchestrator may route to. Each
+   * entry maps to one OrchestratorCatalogEntry in YAML.
+   */
+  catalog: CatalogEntryDraft[];
+
+  /**
+   * v2 dynamic task categories. Each entry maps to one
+   * OrchestratorCategory in YAML.
+   */
+  categories: CategoryDraft[];
+
+  /**
+   * v2/v2.1 classifier — how requests are bucketed into a category, or
+   * (in direct-model mode) mapped straight onto a catalog entry. Empty
+   * strings indicate "leave the key out of YAML" so existing operator
+   * configs aren't disturbed by unrelated saves.
+   */
+  classifierKind: OrchestratorClassifierKind;
+  classifierFirstMatchWins: boolean;
+  classifierLlmEnabled: boolean;
+  classifierLlmProvider: string;
+  classifierLlmModel: string;
+  classifierLlmTimeoutMs: string;
+  classifierLlmCacheTtlSeconds: string;
+  classifierLlmMaxInputChars: string;
+  classifierLlmPromptTemplate: string;
+  classifierLlmFallbackOnError: OrchestratorClassifierFallback;
+  classifierLlmDefaultCategory: string;
 }
 
 export type VisualConfigValues = {
@@ -216,5 +318,51 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
     difficultyMediumThreshold: '',
     traceEnabled: true,
     traceDir: '',
+    catalog: [],
+    categories: [],
+    classifierKind: '',
+    classifierFirstMatchWins: true,
+    classifierLlmEnabled: false,
+    classifierLlmProvider: '',
+    classifierLlmModel: '',
+    classifierLlmTimeoutMs: '',
+    classifierLlmCacheTtlSeconds: '',
+    classifierLlmMaxInputChars: '',
+    classifierLlmPromptTemplate: '',
+    classifierLlmFallbackOnError: '',
+    classifierLlmDefaultCategory: '',
   },
 };
+
+export const makeCatalogEntryDraft = (): CatalogEntryDraft => ({
+  id: makeClientId(),
+  entryId: '',
+  provider: '',
+  model: '',
+  tags: [],
+  description: '',
+  instructions: '',
+  roles: [],
+  costTier: '',
+  latencyTier: '',
+  contextWindow: '',
+  supports: [],
+});
+
+export const makeCategoryDraft = (): CategoryDraft => ({
+  id: makeClientId(),
+  name: '',
+  instructions: '',
+  matchKeywords: [],
+  matchRegex: [],
+  matchRequireCodeBlock: false,
+  matchMinTokens: '',
+  matchMaxTokens: '',
+  matchRequireTools: false,
+  matchAnyOf: [],
+  matchNoneOf: [],
+  prefer: [],
+  rolePinThinker: '',
+  rolePinWorker: '',
+  rolePinVerifier: '',
+});

@@ -1,4 +1,12 @@
-import { memo, useCallback, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
@@ -7,6 +15,11 @@ import { useNotificationStore } from '@/stores';
 import styles from './VisualConfigEditor.module.scss';
 import { copyToClipboard } from '@/utils/clipboard';
 import type {
+  CatalogEntryDraft,
+  CategoryDraft,
+  OrchestratorClassifierFallback,
+  OrchestratorClassifierKind,
+  OrchestratorVisualConfig,
   PayloadFilterRule,
   PayloadModelEntry,
   PayloadParamEntry,
@@ -14,7 +27,11 @@ import type {
   PayloadParamValueType,
   PayloadRule,
 } from '@/types/visualConfig';
-import { makeClientId } from '@/types/visualConfig';
+import {
+  makeCatalogEntryDraft,
+  makeCategoryDraft,
+  makeClientId,
+} from '@/types/visualConfig';
 import {
   getPayloadParamValidationError,
   VISUAL_CONFIG_PAYLOAD_VALUE_TYPE_OPTIONS,
@@ -930,6 +947,810 @@ export const PayloadFilterRulesEditor = memo(function PayloadFilterRulesEditor({
         <Button variant="secondary" size="sm" onClick={addRule} disabled={disabled}>
           {t('config_management.visual.payload_rules.add_rule')}
         </Button>
+      </div>
+    </div>
+  );
+});
+
+/* ============================================================== */
+/* v2/v2.1 orchestrator editors: catalog, categories, classifier. */
+/* ============================================================== */
+
+/**
+ * ChipListInput edits a string[] as a comma-separated text field.
+ *
+ * While the input is focused, `buffer` holds the raw user text so
+ * partial commas/spaces and intermediate states feel natural. While
+ * unfocused, `buffer` is `null` and we display `value.join(', ')` —
+ * which means parent-driven array changes (load YAML, undo) flow in
+ * without any effect-driven re-sync. On blur we commit the parsed
+ * array and clear the buffer.
+ *
+ * Use for tags, roles, capability flags, prefer-ids, keywords —
+ * anywhere a one-line "a, b, c" list is the right shape.
+ */
+const ChipListInput = memo(function ChipListInput({
+  value,
+  placeholder,
+  ariaLabel,
+  disabled,
+  onChange,
+}: {
+  value: string[];
+  placeholder?: string;
+  ariaLabel?: string;
+  disabled?: boolean;
+  onChange: (next: string[]) => void;
+}) {
+  const joined = useMemo(() => value.join(', '), [value]);
+  const [buffer, setBuffer] = useState<string | null>(null);
+  const display = buffer ?? joined;
+
+  const commit = useCallback(
+    (raw: string) => {
+      const next = raw
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      onChange(next);
+    },
+    [onChange]
+  );
+
+  return (
+    <input
+      className="input"
+      placeholder={placeholder}
+      aria-label={ariaLabel ?? placeholder}
+      value={display}
+      disabled={disabled}
+      onFocus={() => setBuffer(joined)}
+      onChange={(e) => setBuffer(e.target.value)}
+      onBlur={(e) => {
+        commit(e.target.value);
+        setBuffer(null);
+      }}
+    />
+  );
+});
+
+/**
+ * CatalogEditor lists OrchestratorCatalogEntry rows. Each row is a
+ * card containing the upstream model identity (provider, model, id)
+ * plus the metadata the classifier reads (description, instructions,
+ * tags, roles, cost/latency tiers, context window, supports).
+ *
+ * Empty rows (no provider AND no model) are kept in the editor for
+ * editing but dropped at YAML serialization time.
+ */
+export const CatalogEditor = memo(function CatalogEditor({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: CatalogEntryDraft[];
+  disabled?: boolean;
+  onChange: (next: CatalogEntryDraft[]) => void;
+}) {
+  const { t } = useTranslation();
+  const entries = value;
+
+  const updateEntry = (index: number, patch: Partial<CatalogEntryDraft>) =>
+    onChange(entries.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)));
+  const removeEntry = (index: number) =>
+    onChange(entries.filter((_, i) => i !== index));
+  const addEntry = () => onChange([...entries, makeCatalogEntryDraft()]);
+
+  return (
+    <div className={styles.blockStack}>
+      {entries.map((entry, index) => (
+        <div key={entry.id} className={styles.ruleCard}>
+          <div className={styles.ruleCardHeader}>
+            <div className={styles.ruleCardTitle}>
+              {t('config_management.visual.sections.orchestrator.catalog_entry', {
+                defaultValue: 'Catalog entry {{n}}',
+                n: index + 1,
+              })}
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => removeEntry(index)}
+              disabled={disabled}
+            >
+              {t('config_management.visual.common.delete')}
+            </Button>
+          </div>
+
+          <div className={styles.blockStack}>
+            <input
+              className="input"
+              placeholder={t('config_management.visual.sections.orchestrator.catalog_id_ph', {
+                defaultValue: 'id (e.g. claude-opus-4.8)',
+              })}
+              aria-label={t('config_management.visual.sections.orchestrator.catalog_id', {
+                defaultValue: 'Catalog id',
+              })}
+              value={entry.entryId}
+              disabled={disabled}
+              onChange={(e) => updateEntry(index, { entryId: e.target.value })}
+            />
+            <input
+              className="input"
+              placeholder={t(
+                'config_management.visual.sections.orchestrator.catalog_provider_ph',
+                { defaultValue: 'provider (e.g. claude, codex, gemini-cli)' }
+              )}
+              aria-label={t('config_management.visual.sections.orchestrator.catalog_provider', {
+                defaultValue: 'Provider',
+              })}
+              value={entry.provider}
+              disabled={disabled}
+              onChange={(e) => updateEntry(index, { provider: e.target.value })}
+            />
+            <input
+              className="input"
+              placeholder={t('config_management.visual.sections.orchestrator.catalog_model_ph', {
+                defaultValue: 'model (e.g. claude-opus-4-5-20251101)',
+              })}
+              aria-label={t('config_management.visual.sections.orchestrator.catalog_model', {
+                defaultValue: 'Model',
+              })}
+              value={entry.model}
+              disabled={disabled}
+              onChange={(e) => updateEntry(index, { model: e.target.value })}
+            />
+
+            <input
+              className="input"
+              placeholder={t('config_management.visual.sections.orchestrator.catalog_desc_ph', {
+                defaultValue: 'One-line description (LLM classifier hint)',
+              })}
+              aria-label={t('config_management.visual.sections.orchestrator.catalog_desc', {
+                defaultValue: 'Description',
+              })}
+              value={entry.description}
+              disabled={disabled}
+              onChange={(e) => updateEntry(index, { description: e.target.value })}
+            />
+
+            <textarea
+              className="input"
+              rows={4}
+              placeholder={t(
+                'config_management.visual.sections.orchestrator.catalog_instructions_ph',
+                {
+                  defaultValue:
+                    'Paragraph instructions for direct-model routing — what is this model uniquely good at? Avoid using it for…',
+                }
+              )}
+              aria-label={t(
+                'config_management.visual.sections.orchestrator.catalog_instructions',
+                { defaultValue: 'Instructions' }
+              )}
+              value={entry.instructions}
+              disabled={disabled}
+              onChange={(e) => updateEntry(index, { instructions: e.target.value })}
+            />
+
+            <ChipListInput
+              value={entry.tags}
+              placeholder={t('config_management.visual.sections.orchestrator.catalog_tags_ph', {
+                defaultValue: 'tags (comma-separated, e.g. code, vision, math)',
+              })}
+              ariaLabel={t('config_management.visual.sections.orchestrator.catalog_tags', {
+                defaultValue: 'Tags',
+              })}
+              disabled={disabled}
+              onChange={(tags) => updateEntry(index, { tags })}
+            />
+
+            <ChipListInput
+              value={entry.roles}
+              placeholder={t('config_management.visual.sections.orchestrator.catalog_roles_ph', {
+                defaultValue: 'roles (comma-separated: thinker, worker, verifier, classifier)',
+              })}
+              ariaLabel={t('config_management.visual.sections.orchestrator.catalog_roles', {
+                defaultValue: 'Roles',
+              })}
+              disabled={disabled}
+              onChange={(roles) => updateEntry(index, { roles })}
+            />
+
+            <ChipListInput
+              value={entry.supports}
+              placeholder={t(
+                'config_management.visual.sections.orchestrator.catalog_supports_ph',
+                {
+                  defaultValue:
+                    'supports (comma-separated: streaming, tools, vision, json-mode)',
+                }
+              )}
+              ariaLabel={t('config_management.visual.sections.orchestrator.catalog_supports', {
+                defaultValue: 'Supports',
+              })}
+              disabled={disabled}
+              onChange={(supports) => updateEntry(index, { supports })}
+            />
+
+            <div className={styles.stringListRow}>
+              <input
+                className="input"
+                placeholder={t('config_management.visual.sections.orchestrator.catalog_cost_ph', {
+                  defaultValue: 'cost-tier (cheap | mid | high)',
+                })}
+                aria-label={t('config_management.visual.sections.orchestrator.catalog_cost', {
+                  defaultValue: 'Cost tier',
+                })}
+                value={entry.costTier}
+                disabled={disabled}
+                onChange={(e) => updateEntry(index, { costTier: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder={t(
+                  'config_management.visual.sections.orchestrator.catalog_latency_ph',
+                  { defaultValue: 'latency-tier (fast | mid | slow)' }
+                )}
+                aria-label={t('config_management.visual.sections.orchestrator.catalog_latency', {
+                  defaultValue: 'Latency tier',
+                })}
+                value={entry.latencyTier}
+                disabled={disabled}
+                onChange={(e) => updateEntry(index, { latencyTier: e.target.value })}
+              />
+              <input
+                className="input"
+                type="number"
+                inputMode="numeric"
+                placeholder={t('config_management.visual.sections.orchestrator.catalog_ctx_ph', {
+                  defaultValue: 'context-window (tokens)',
+                })}
+                aria-label={t('config_management.visual.sections.orchestrator.catalog_ctx', {
+                  defaultValue: 'Context window',
+                })}
+                value={entry.contextWindow}
+                disabled={disabled}
+                onChange={(e) => updateEntry(index, { contextWindow: e.target.value })}
+              />
+            </div>
+          </div>
+        </div>
+      ))}
+
+      {entries.length === 0 && (
+        <div className={styles.emptyState}>
+          {t('config_management.visual.sections.orchestrator.catalog_empty', {
+            defaultValue:
+              'No catalog entries. Add one per upstream model you want the orchestrator to route to.',
+          })}
+        </div>
+      )}
+
+      <div className={styles.actionRow}>
+        <Button variant="secondary" size="sm" onClick={addEntry} disabled={disabled}>
+          {t('config_management.visual.sections.orchestrator.catalog_add', {
+            defaultValue: 'Add catalog entry',
+          })}
+        </Button>
+      </div>
+    </div>
+  );
+});
+
+/**
+ * CategoriesEditor lists OrchestratorCategory rows. Each row carries
+ * the category's identity (name, instructions), its deterministic
+ * heuristic match predicates, the ordered Prefer list of catalog ids,
+ * and the optional per-role pins for tri-role mode.
+ */
+export const CategoriesEditor = memo(function CategoriesEditor({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: CategoryDraft[];
+  disabled?: boolean;
+  onChange: (next: CategoryDraft[]) => void;
+}) {
+  const { t } = useTranslation();
+  const entries = value;
+
+  const updateEntry = (index: number, patch: Partial<CategoryDraft>) =>
+    onChange(entries.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)));
+  const removeEntry = (index: number) =>
+    onChange(entries.filter((_, i) => i !== index));
+  const addEntry = () => onChange([...entries, makeCategoryDraft()]);
+
+  return (
+    <div className={styles.blockStack}>
+      {entries.map((entry, index) => (
+        <div key={entry.id} className={styles.ruleCard}>
+          <div className={styles.ruleCardHeader}>
+            <div className={styles.ruleCardTitle}>
+              {t('config_management.visual.sections.orchestrator.category_entry', {
+                defaultValue: 'Category {{n}}',
+                n: index + 1,
+              })}
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => removeEntry(index)}
+              disabled={disabled}
+            >
+              {t('config_management.visual.common.delete')}
+            </Button>
+          </div>
+
+          <div className={styles.blockStack}>
+            <input
+              className="input"
+              placeholder={t('config_management.visual.sections.orchestrator.category_name_ph', {
+                defaultValue: 'name (e.g. code-review, math-proof, bn-en-translation)',
+              })}
+              aria-label={t('config_management.visual.sections.orchestrator.category_name', {
+                defaultValue: 'Category name',
+              })}
+              value={entry.name}
+              disabled={disabled}
+              onChange={(e) => updateEntry(index, { name: e.target.value })}
+            />
+
+            <textarea
+              className="input"
+              rows={3}
+              placeholder={t(
+                'config_management.visual.sections.orchestrator.category_instructions_ph',
+                {
+                  defaultValue:
+                    'When this category applies — natural language. The LLM classifier sees this.',
+                }
+              )}
+              aria-label={t(
+                'config_management.visual.sections.orchestrator.category_instructions',
+                { defaultValue: 'Instructions' }
+              )}
+              value={entry.instructions}
+              disabled={disabled}
+              onChange={(e) => updateEntry(index, { instructions: e.target.value })}
+            />
+
+            <div className={styles.blockLabel}>
+              {t('config_management.visual.sections.orchestrator.category_match', {
+                defaultValue: 'Heuristic match predicates (logical AND across non-empty fields)',
+              })}
+            </div>
+
+            <ChipListInput
+              value={entry.matchKeywords}
+              placeholder={t(
+                'config_management.visual.sections.orchestrator.category_keywords_ph',
+                { defaultValue: 'match.keywords (any-of substrings, comma-separated)' }
+              )}
+              ariaLabel="Match keywords"
+              disabled={disabled}
+              onChange={(matchKeywords) => updateEntry(index, { matchKeywords })}
+            />
+            <ChipListInput
+              value={entry.matchRegex}
+              placeholder={t('config_management.visual.sections.orchestrator.category_regex_ph', {
+                defaultValue: 'match.regex (Go regex patterns, comma-separated)',
+              })}
+              ariaLabel="Match regex"
+              disabled={disabled}
+              onChange={(matchRegex) => updateEntry(index, { matchRegex })}
+            />
+            <ChipListInput
+              value={entry.matchAnyOf}
+              placeholder={t('config_management.visual.sections.orchestrator.category_anyof_ph', {
+                defaultValue: 'match.any-of (substrings, comma-separated)',
+              })}
+              ariaLabel="Any of"
+              disabled={disabled}
+              onChange={(matchAnyOf) => updateEntry(index, { matchAnyOf })}
+            />
+            <ChipListInput
+              value={entry.matchNoneOf}
+              placeholder={t('config_management.visual.sections.orchestrator.category_noneof_ph', {
+                defaultValue: 'match.none-of (forbidden substrings, comma-separated)',
+              })}
+              ariaLabel="None of"
+              disabled={disabled}
+              onChange={(matchNoneOf) => updateEntry(index, { matchNoneOf })}
+            />
+
+            <div className={styles.stringListRow}>
+              <input
+                className="input"
+                type="number"
+                inputMode="numeric"
+                placeholder={t('config_management.visual.sections.orchestrator.category_min_ph', {
+                  defaultValue: 'min-tokens',
+                })}
+                aria-label="Match min tokens"
+                value={entry.matchMinTokens}
+                disabled={disabled}
+                onChange={(e) => updateEntry(index, { matchMinTokens: e.target.value })}
+              />
+              <input
+                className="input"
+                type="number"
+                inputMode="numeric"
+                placeholder={t('config_management.visual.sections.orchestrator.category_max_ph', {
+                  defaultValue: 'max-tokens',
+                })}
+                aria-label="Match max tokens"
+                value={entry.matchMaxTokens}
+                disabled={disabled}
+                onChange={(e) => updateEntry(index, { matchMaxTokens: e.target.value })}
+              />
+            </div>
+
+            <div className={styles.stringListRow}>
+              <label className={styles.toggleRow}>
+                <span>
+                  {t('config_management.visual.sections.orchestrator.category_code_block', {
+                    defaultValue: 'Require code block',
+                  })}
+                </span>
+                <input
+                  type="checkbox"
+                  checked={entry.matchRequireCodeBlock}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    updateEntry(index, { matchRequireCodeBlock: e.target.checked })
+                  }
+                />
+              </label>
+              <label className={styles.toggleRow}>
+                <span>
+                  {t('config_management.visual.sections.orchestrator.category_require_tools', {
+                    defaultValue: 'Require tools',
+                  })}
+                </span>
+                <input
+                  type="checkbox"
+                  checked={entry.matchRequireTools}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    updateEntry(index, { matchRequireTools: e.target.checked })
+                  }
+                />
+              </label>
+            </div>
+
+            <div className={styles.blockLabel}>
+              {t('config_management.visual.sections.orchestrator.category_prefer', {
+                defaultValue: 'Prefer (ordered catalog ids)',
+              })}
+            </div>
+            <ChipListInput
+              value={entry.prefer}
+              placeholder={t(
+                'config_management.visual.sections.orchestrator.category_prefer_ph',
+                {
+                  defaultValue:
+                    'catalog ids, comma-separated (first match in candidate set wins)',
+                }
+              )}
+              ariaLabel="Prefer"
+              disabled={disabled}
+              onChange={(prefer) => updateEntry(index, { prefer })}
+            />
+
+            <div className={styles.blockLabel}>
+              {t('config_management.visual.sections.orchestrator.category_role_pins', {
+                defaultValue: 'Role pins (override Prefer for the named role)',
+              })}
+            </div>
+            <input
+              className="input"
+              placeholder={t(
+                'config_management.visual.sections.orchestrator.category_pin_thinker_ph',
+                { defaultValue: 'role-pins.thinker (catalog id)' }
+              )}
+              aria-label="Thinker pin"
+              value={entry.rolePinThinker}
+              disabled={disabled}
+              onChange={(e) => updateEntry(index, { rolePinThinker: e.target.value })}
+            />
+            <input
+              className="input"
+              placeholder={t(
+                'config_management.visual.sections.orchestrator.category_pin_worker_ph',
+                { defaultValue: 'role-pins.worker (catalog id)' }
+              )}
+              aria-label="Worker pin"
+              value={entry.rolePinWorker}
+              disabled={disabled}
+              onChange={(e) => updateEntry(index, { rolePinWorker: e.target.value })}
+            />
+            <input
+              className="input"
+              placeholder={t(
+                'config_management.visual.sections.orchestrator.category_pin_verifier_ph',
+                { defaultValue: 'role-pins.verifier (catalog id)' }
+              )}
+              aria-label="Verifier pin"
+              value={entry.rolePinVerifier}
+              disabled={disabled}
+              onChange={(e) => updateEntry(index, { rolePinVerifier: e.target.value })}
+            />
+          </div>
+        </div>
+      ))}
+
+      {entries.length === 0 && (
+        <div className={styles.emptyState}>
+          {t('config_management.visual.sections.orchestrator.categories_empty', {
+            defaultValue:
+              'No categories. The orchestrator will use only legacy code/math/recall classification until you add one.',
+          })}
+        </div>
+      )}
+
+      <div className={styles.actionRow}>
+        <Button variant="secondary" size="sm" onClick={addEntry} disabled={disabled}>
+          {t('config_management.visual.sections.orchestrator.categories_add', {
+            defaultValue: 'Add category',
+          })}
+        </Button>
+      </div>
+    </div>
+  );
+});
+
+/**
+ * ClassifierEditor configures how requests are bucketed — heuristic
+ * only, LLM-picks-a-category, hybrid (heuristic first, LLM on miss),
+ * or direct-model (LLM picks a catalog id directly). The LLM sub-form
+ * is the larger surface: provider/model + caching + timeouts + the
+ * optional override prompt template + fallback strategy.
+ */
+type ClassifierPatch = Partial<
+  Pick<
+    OrchestratorVisualConfig,
+    | 'classifierKind'
+    | 'classifierFirstMatchWins'
+    | 'classifierLlmEnabled'
+    | 'classifierLlmProvider'
+    | 'classifierLlmModel'
+    | 'classifierLlmTimeoutMs'
+    | 'classifierLlmCacheTtlSeconds'
+    | 'classifierLlmMaxInputChars'
+    | 'classifierLlmPromptTemplate'
+    | 'classifierLlmFallbackOnError'
+    | 'classifierLlmDefaultCategory'
+  >
+>;
+
+export const ClassifierEditor = memo(function ClassifierEditor({
+  values,
+  disabled,
+  onChange,
+}: {
+  values: OrchestratorVisualConfig;
+  disabled?: boolean;
+  onChange: (patch: ClassifierPatch) => void;
+}) {
+  const { t } = useTranslation();
+  const kindOptions = useMemo(
+    () => [
+      {
+        value: '',
+        label: t('config_management.visual.sections.orchestrator.classifier_kind_default', {
+          defaultValue: '(unset — orchestrator default)',
+        }),
+      },
+      { value: 'heuristic', label: 'heuristic' },
+      { value: 'llm', label: 'llm' },
+      { value: 'hybrid', label: 'hybrid' },
+      { value: 'direct-model', label: 'direct-model' },
+    ],
+    [t]
+  );
+  const fallbackOptions = useMemo(
+    () => [
+      {
+        value: '',
+        label: t('config_management.visual.sections.orchestrator.classifier_fb_default', {
+          defaultValue: '(unset — heuristic)',
+        }),
+      },
+      { value: 'heuristic', label: 'heuristic' },
+      { value: 'default-category', label: 'default-category' },
+      { value: 'fail', label: 'fail' },
+    ],
+    [t]
+  );
+
+  const llmActive =
+    values.classifierKind === 'llm' ||
+    values.classifierKind === 'hybrid' ||
+    values.classifierKind === 'direct-model' ||
+    values.classifierLlmEnabled;
+
+  return (
+    <div className={styles.blockStack}>
+      <div className={styles.fieldShell}>
+        <label className={styles.fieldLabel}>
+          {t('config_management.visual.sections.orchestrator.classifier_kind', {
+            defaultValue: 'Classifier mode',
+          })}
+        </label>
+        <Select
+          value={values.classifierKind}
+          options={kindOptions}
+          disabled={disabled}
+          onChange={(nextValue) =>
+            onChange({ classifierKind: nextValue as OrchestratorClassifierKind })
+          }
+        />
+        <div className={styles.fieldHint}>
+          {t('config_management.visual.sections.orchestrator.classifier_kind_hint', {
+            defaultValue:
+              'heuristic = deterministic match only. llm = LLM picks a category name. hybrid = heuristic, then LLM on miss. direct-model = LLM picks a catalog id directly from per-entry instructions paragraphs.',
+          })}
+        </div>
+      </div>
+
+      <label className={styles.toggleRow}>
+        <span>
+          {t('config_management.visual.sections.orchestrator.classifier_first_match', {
+            defaultValue: 'Heuristic: first-match-wins',
+          })}
+        </span>
+        <input
+          type="checkbox"
+          checked={values.classifierFirstMatchWins}
+          disabled={disabled}
+          onChange={(e) => onChange({ classifierFirstMatchWins: e.target.checked })}
+        />
+      </label>
+
+      <div className={styles.subsection}>
+        <div className={styles.subsectionHeader}>
+          <h3 className={styles.subsectionTitle}>
+            {t('config_management.visual.sections.orchestrator.classifier_llm_title', {
+              defaultValue: 'LLM classifier',
+            })}
+          </h3>
+          <p className={styles.subsectionDescription}>
+            {t('config_management.visual.sections.orchestrator.classifier_llm_desc', {
+              defaultValue:
+                'Used when mode is llm, hybrid, or direct-model. Pick a cheap, fast upstream — the call is per-request and cached by request hash.',
+            })}
+          </p>
+        </div>
+
+        <label className={styles.toggleRow}>
+          <span>
+            {t('config_management.visual.sections.orchestrator.classifier_llm_enabled', {
+              defaultValue: 'Enable LLM classifier',
+            })}
+          </span>
+          <input
+            type="checkbox"
+            checked={values.classifierLlmEnabled}
+            disabled={disabled}
+            onChange={(e) => onChange({ classifierLlmEnabled: e.target.checked })}
+          />
+        </label>
+
+        <div className={styles.stringListRow}>
+          <input
+            className="input"
+            placeholder={t(
+              'config_management.visual.sections.orchestrator.classifier_llm_provider_ph',
+              { defaultValue: 'provider (e.g. openai-compatibility, claude)' }
+            )}
+            aria-label="LLM classifier provider"
+            value={values.classifierLlmProvider}
+            disabled={disabled || !llmActive}
+            onChange={(e) => onChange({ classifierLlmProvider: e.target.value })}
+          />
+          <input
+            className="input"
+            placeholder={t(
+              'config_management.visual.sections.orchestrator.classifier_llm_model_ph',
+              { defaultValue: 'model (e.g. gpt-5-mini)' }
+            )}
+            aria-label="LLM classifier model"
+            value={values.classifierLlmModel}
+            disabled={disabled || !llmActive}
+            onChange={(e) => onChange({ classifierLlmModel: e.target.value })}
+          />
+        </div>
+
+        <div className={styles.stringListRow}>
+          <input
+            className="input"
+            type="number"
+            inputMode="numeric"
+            placeholder={t(
+              'config_management.visual.sections.orchestrator.classifier_llm_timeout_ph',
+              { defaultValue: 'timeout-ms (default 800)' }
+            )}
+            aria-label="LLM classifier timeout"
+            value={values.classifierLlmTimeoutMs}
+            disabled={disabled || !llmActive}
+            onChange={(e) => onChange({ classifierLlmTimeoutMs: e.target.value })}
+          />
+          <input
+            className="input"
+            type="number"
+            inputMode="numeric"
+            placeholder={t(
+              'config_management.visual.sections.orchestrator.classifier_llm_cache_ph',
+              { defaultValue: 'cache-ttl-seconds (default 300)' }
+            )}
+            aria-label="LLM classifier cache TTL"
+            value={values.classifierLlmCacheTtlSeconds}
+            disabled={disabled || !llmActive}
+            onChange={(e) => onChange({ classifierLlmCacheTtlSeconds: e.target.value })}
+          />
+          <input
+            className="input"
+            type="number"
+            inputMode="numeric"
+            placeholder={t(
+              'config_management.visual.sections.orchestrator.classifier_llm_maxchars_ph',
+              { defaultValue: 'max-input-chars (default 4000)' }
+            )}
+            aria-label="LLM classifier max input chars"
+            value={values.classifierLlmMaxInputChars}
+            disabled={disabled || !llmActive}
+            onChange={(e) => onChange({ classifierLlmMaxInputChars: e.target.value })}
+          />
+        </div>
+
+        <textarea
+          className="input"
+          rows={4}
+          placeholder={t(
+            'config_management.visual.sections.orchestrator.classifier_llm_prompt_ph',
+            {
+              defaultValue:
+                'Optional routing prompt override. Placeholders: {{categories}}, {{models}}, {{request}}.',
+            }
+          )}
+          aria-label="LLM classifier prompt template"
+          value={values.classifierLlmPromptTemplate}
+          disabled={disabled || !llmActive}
+          onChange={(e) => onChange({ classifierLlmPromptTemplate: e.target.value })}
+        />
+
+        <div className={styles.stringListRow}>
+          <div className={styles.fieldShell}>
+            <label className={styles.fieldLabel}>
+              {t('config_management.visual.sections.orchestrator.classifier_llm_fallback', {
+                defaultValue: 'On error',
+              })}
+            </label>
+            <Select
+              value={values.classifierLlmFallbackOnError}
+              options={fallbackOptions}
+              disabled={disabled || !llmActive}
+              onChange={(nextValue) =>
+                onChange({
+                  classifierLlmFallbackOnError: nextValue as OrchestratorClassifierFallback,
+                })
+              }
+            />
+          </div>
+          <input
+            className="input"
+            placeholder={t(
+              'config_management.visual.sections.orchestrator.classifier_llm_default_cat_ph',
+              { defaultValue: 'default-category (used with default-category fallback)' }
+            )}
+            aria-label="Default category"
+            value={values.classifierLlmDefaultCategory}
+            disabled={disabled || !llmActive}
+            onChange={(e) => onChange({ classifierLlmDefaultCategory: e.target.value })}
+          />
+        </div>
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 # Project State — CLIProxyAPI / llm-proxy
 
-Last updated: 2026-06-24 (post-PR #1 + v2 catalog/categories + v2.1 direct-model)
+Last updated: 2026-06-25 (post-PR #2 + visual editor surfaces for v2/v2.1)
 
 ## What this project is
 Go-based proxy (CLIProxyAPI fork) that exposes OpenAI/Gemini/Claude/Codex-compatible
@@ -71,6 +71,17 @@ handful of providers. v2 adds, additively (legacy still works):
 - Visual config editor for v2 fields is NOT yet built — catalog and
   categories are YAML-only this iteration. Adding a Catalog + Categories
   section to the React `VisualConfigEditor.tsx` is a follow-up PR.
+  **Shipped in PR #3** (this branch): `CatalogEditor`,
+  `CategoriesEditor`, `ClassifierEditor` in
+  `client/src/components/config/VisualConfigEditorBlocks.tsx`; new draft
+  types `CatalogEntryDraft`, `CategoryDraft`, and flattened classifier
+  fields in `client/src/types/visualConfig.ts`; round-trip
+  parse/serialize/dirty-tracking in
+  `client/src/hooks/useVisualConfig.ts`; three new SectionSubsections
+  inside the Orchestrator section of `VisualConfigEditor.tsx`. The
+  surface is additive — saves preserve YAML keys the user didn't touch,
+  empty rows are dropped at serialization time, and the section stays
+  invisible until the operator opts in.
 
 ## v2.1 direct-model routing (no categories required)
 The simpler mental model the user asked for: describe each model in a
