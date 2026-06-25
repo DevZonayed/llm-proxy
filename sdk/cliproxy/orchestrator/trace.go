@@ -38,8 +38,10 @@ type TraceRecord struct {
 	APIKeyHash string       `json:"api_key_hash,omitempty"`
 	Mode       string       `json:"mode"`
 	Difficulty string       `json:"difficulty"`
-	UserHint   string       `json:"user_hint"`
-	Providers  []string     `json:"providers"`
+	UserHint       string       `json:"user_hint"`
+	Category       string       `json:"category,omitempty"`
+	ModelCatalogID string       `json:"model_catalog_id,omitempty"`
+	Providers      []string     `json:"providers"`
 	Turns      []TraceTurn  `json:"turns,omitempty"`
 	Final      TraceFinal   `json:"final"`
 	Reward     *TraceReward `json:"reward,omitempty"`

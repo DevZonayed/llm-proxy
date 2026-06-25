@@ -36,6 +36,12 @@ type OrchestratorLearnedConfig = internalconfig.OrchestratorLearnedConfig
 type OrchestratorBudgetConfig = internalconfig.OrchestratorBudgetConfig
 type OrchestratorDifficultyConfig = internalconfig.OrchestratorDifficultyConfig
 type OrchestratorTraceConfig = internalconfig.OrchestratorTraceConfig
+type OrchestratorCatalogEntry = internalconfig.OrchestratorCatalogEntry
+type OrchestratorCategory = internalconfig.OrchestratorCategory
+type OrchestratorCategoryMatch = internalconfig.OrchestratorCategoryMatch
+type OrchestratorClassifierConfig = internalconfig.OrchestratorClassifierConfig
+type OrchestratorClassifierHeuristicConfig = internalconfig.OrchestratorClassifierHeuristicConfig
+type OrchestratorClassifierLLMConfig = internalconfig.OrchestratorClassifierLLMConfig
 
 type TLS = internalconfig.TLSConfig
 

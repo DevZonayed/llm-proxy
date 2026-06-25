@@ -614,3 +614,374 @@ Negative tests:
 4. The Fugu report (section 4+) is **truncated** in the source provided. Once
    the Conductor / self-hosting comparison sections are available, expect
    amendments to §10 and possibly §7 (Conductor-specific budgets).
+
+---
+
+## 15. Routing policy v2 — catalog, dynamic categories, optional LLM classifier
+
+§7's `policy.rules.defaults` / `policy.rules.models` table is enough when you
+have ~3 provider families and a coarse code/math/recall split. The moment
+you bring in **many models across providers** (different versions, vision
+vs. text, fast vs. strong, cheap classifiers vs. expensive reasoners), the
+3-line table runs out of room. v2 extends the orchestrator with three
+peer concepts:
+
+1. **Catalog** — a list of `(provider, model)` entries enriched with tags,
+   a one-line description, and tier hints. This is the knowledge base.
+2. **Categories** — dynamic, user-defined task buckets. Each category has
+   a natural-language instruction, optional deterministic match
+   predicates (keywords, regex, token range, code-block-present,
+   tools-present), an ordered `prefer` list of catalog ids, and
+   per-role pins (Thinker / Worker / Verifier).
+3. **Classifier** — picks one category per request. Modes:
+   `heuristic` (predicates only), `llm` (cheap upstream model picks
+   from the category names + instructions), or `hybrid` (heuristic
+   first; LLM only when nothing matches).
+
+The legacy `defaults`/`models` table is **kept as the fallback**. If a
+request matches no category — or the catalog can't satisfy the matched
+category from the current candidate set — the policy falls back to the
+old code/math/recall routing exactly as today.
+
+### 15.1 Configuration schema (additive to §7)
+
+```yaml
+orchestrator:
+  enabled: true
+  mode: auto
+
+  # ... existing fields from §7 ...
+
+  catalog:
+    - id: claude-opus-4.8
+      provider: claude
+      model: claude-opus-4-5-20251101
+      tags: [code, reasoning, long-context]
+      description: "Best for software engineering, refactors, debugging."
+      cost-tier: high
+    - id: claude-haiku-4.5
+      provider: claude
+      model: claude-haiku-4-5-20251001
+      tags: [cheap, fast, summarization]
+      cost-tier: cheap
+    - id: gpt-5-thinking
+      provider: codex
+      model: gpt-5-thinking
+      tags: [math, planning, reasoning]
+    - id: gpt-5-mini
+      provider: openai-compatibility
+      model: gpt-5-mini
+      tags: [cheap, fast, classification]
+    - id: gemini-3-pro
+      provider: gemini-cli
+      model: gemini-3.1-pro
+      tags: [recall, long-context, multimodal]
+
+  categories:
+    - name: code-review
+      instructions: "User asks to review code, find bugs, suggest refactors."
+      match: { keywords: [review, refactor, bug], require-code-block: true }
+      prefer: [claude-opus-4.8, gpt-5-thinking]
+      role-pins:
+        thinker:  claude-haiku-4.5
+        worker:   claude-opus-4.8
+        verifier: gpt-5-thinking
+
+    - name: math-proof
+      instructions: "User asks to prove a theorem, solve a problem, check a derivation."
+      match: { keywords: [prove, theorem, derivative], regex: ["\\$\\$"] }
+      prefer: [gpt-5-thinking, claude-opus-4.8]
+
+    - name: long-context-rag
+      instructions: "Long document attached, asking questions about it."
+      match: { min-tokens: 30000 }
+      prefer: [gemini-3-pro, claude-opus-4.8]
+
+    - name: default
+      instructions: "Everything else."
+      prefer: [claude-haiku-4.5, gpt-5-mini]
+
+  classifier:
+    kind: hybrid                      # heuristic | llm | hybrid
+    heuristic: { first-match-wins: true }
+    llm:
+      enabled: true
+      provider: openai-compatibility
+      model: gpt-5-mini               # cheap, fast
+      timeout-ms: 800
+      cache-ttl-seconds: 300          # cache by hash of user message
+      max-input-chars: 4000
+      fallback-on-error: heuristic    # heuristic | default-category | fail
+      default-category: default
+```
+
+### 15.2 Resolution order (per turn)
+
+1. The orchestrator pre-classifies the request **once** at request
+   start and stuffs the picked category name into `TurnState.CategoryHint`.
+   The same hint is reused across every turn of the tri-role loop —
+   re-classifying mid-loop costs latency without providing signal.
+2. `RulesPolicy.Decide` first consults `categories`:
+   - Look up the category struct by name (case-insensitive).
+   - For the current role, try `role-pins[role]` first; if absent or
+     the pinned catalog id's provider isn't in the candidate set, walk
+     `prefer` in order and pick the first id whose provider is.
+   - On hit, emit `Action{Provider, Model}` from the catalog entry.
+3. On miss, fall back to the legacy `classifyDomain` + `defaults` +
+   `models` path (the v0 behavior, untouched).
+4. Account selection inside the chosen provider still goes through the
+   existing `Selector.Pick` — unchanged.
+
+### 15.3 The LLM classifier
+
+When `classifier.kind` is `llm` or `hybrid` and `classifier.llm.enabled`
+is true, the orchestrator builds a short prompt of the form:
+
+```
+You are a routing classifier for an LLM proxy. Given a user request and
+a list of category names with descriptions, pick the single best-fitting
+category. Reply with ONLY the chosen category name.
+
+Categories:
+- code-review: User asks to review code, find bugs, suggest refactors.
+- math-proof: User asks to prove a theorem, solve a problem, check a derivation.
+- long-context-rag: Long document attached, asking questions about it.
+- default: Everything else.
+
+User request (lowercased excerpt):
+<first 4000 chars of the user message>
+```
+
+That prompt is sent **through the proxy's own AuthManager** to
+`classifier.llm.provider` / `classifier.llm.model` as an OpenAI-shaped
+chat-completions call. The reply is normalized (trimmed, lowercased,
+"category: foo" prefixes stripped, partial-substring fallback) and
+matched against the configured category names.
+
+- `timeout-ms` bounds the classifier call (default 800 ms).
+- `cache-ttl-seconds` caches per `(model, user-text)` hash so repeated
+  similar requests don't pay for re-classification (default 300 s).
+- `fallback-on-error` selects what to do when the classifier fails,
+  times out, or returns an unknown reply: `heuristic` (default — run
+  the deterministic matcher), `default-category` (use
+  `default-category` verbatim), or `fail` (return an empty hint and
+  let the legacy domain heuristic take over).
+
+The classifier provider **must already be in the request's candidate
+provider set** — otherwise we'd ship the classifier call somewhere it
+doesn't belong. When it isn't, the classifier is skipped silently and
+the fallback rule fires.
+
+### 15.4 What gets recorded
+
+Each trace record now carries a `category` field (the picked category
+name, or `""`). Combined with the existing per-turn `provider` and
+`model` fields, this gives the trace store enough signal to train a
+learned policy that supersedes the rules-and-LLM stack entirely (still
+the v1 workstream from §8).
+
+### 15.5 Files added/changed in v2
+
+Net-new in `sdk/cliproxy/orchestrator/`:
+
+- `categories.go` — catalog index + heuristic category matcher.
+- `category_input.go` — payload extraction (user text, tools,
+  approx-token count) shared by both classifiers.
+- `classifier_llm.go` — LLM-based classifier, cache, normalization.
+- `categories_test.go` — unit tests for catalog/category/classifier.
+
+Modified (small):
+
+- `internal/config/orchestrator.go` — `OrchestratorCatalogEntry`,
+  `OrchestratorCategory`, `OrchestratorClassifierConfig` types added
+  to `OrchestratorConfig`. Existing fields untouched.
+- `sdk/config/config.go` — re-exports the new types.
+- `sdk/cliproxy/orchestrator/config.go` — `Catalog`, `Categories`,
+  `Classifier` fields on the package's `Config`; new `Default()`
+  values; `Validate()` checks catalog id uniqueness and that every
+  category Prefer/RolePin references an existing catalog id.
+- `sdk/cliproxy/orchestrator/from_config.go` — clones the new fields
+  off the YAML config.
+- `sdk/cliproxy/orchestrator/policy.go` — `TurnState` gains
+  `CategoryHint string`.
+- `sdk/cliproxy/orchestrator/policy_rules.go` — variadic
+  `NewRulesPolicy` constructor + `WithCatalog`/`WithCategories`
+  functional options + category-first branch in `Decide`.
+- `sdk/cliproxy/orchestrator/orchestrator.go` — `Orchestrator` holds
+  `catClass` + `llmClass`; `Decide` runs `classifyCategory` once and
+  ships the hint via `Decision.CategoryHint`; `runLoop` forwards the
+  hint into every turn's `TurnState`.
+- `sdk/cliproxy/orchestrator/trace.go` — `TraceRecord.Category`.
+- `sdk/api/handlers/handlers.go` — forwards `Decision.CategoryHint`
+  into `RunRequest` for both the stream and non-stream paths, and
+  honors `Decision.NormalizedModel` for single-shot dispatch.
+- `config.example.yaml` — full worked example in the orchestrator
+  block.
+
+### 15.6 What v2 still does NOT do
+
+- **Per-tenant policies.** One catalog + one category list per
+  CLIProxyAPI instance. v1 of multi-tenant routing is unchanged.
+- **Cost-aware optimization.** `cost-tier` is recorded but does not
+  yet weight selection. v1 workstream.
+- **Auto-discovery of catalog entries.** Operators write the catalog
+  by hand. A future enhancement could seed it from
+  `AI Providers → Models` already exposed in the UI.
+- **Visual config editor for v2 fields.** The existing
+  `VisualConfigEditor` Orchestrator section covers v0 fields only;
+  catalog/categories editing is YAML-only for now. Adding a visual
+  surface is a follow-up PR.
+
+---
+
+## 16. Direct-model routing (v2.1)
+
+§15's category-first scheme works, but it forces operators to write
+*two* layers: a list of categories and a catalog of models. For an
+operator with 50 models, hand-curating both is busywork. The simpler
+mental model is: **describe each model in a paragraph and let the LLM
+pick the model directly.** v2.1 adds that path without removing
+anything from v2.
+
+### 16.1 Schema additions
+
+`OrchestratorCatalogEntry` gains two fields:
+
+| Field          | Type     | Purpose                                                                 |
+|----------------|----------|-------------------------------------------------------------------------|
+| `instructions` | string   | Paragraph-level briefing the direct-model classifier reads. Falls back to `description` when blank. |
+| `roles`        | []string | Soft hint for tri-role: `["thinker"]`, `["worker"]`, `["verifier"]`. Empty means "any role". |
+
+`OrchestratorClassifierConfig.Kind` gains a new value:
+
+- `direct-model` — LLM picks a **catalog id**, not a category name.
+
+`Validate()` requires a non-empty `catalog` when `kind: direct-model`.
+
+### 16.2 Wire shape
+
+The orchestrator now ships two parallel LLM classifiers in
+`sdk/cliproxy/orchestrator/`:
+
+- `classifier_llm.go` — picks a **category** name from `categories[]`.
+- `classifier_direct.go` — picks a **catalog id** from `catalog[]`.
+
+Both reuse the same `llmCache`, `MaxInputChars`, `Timeout`, and
+provider-must-be-in-candidate-set guard. The selection between them is
+purely `classifier.kind`. v2.1 deliberately does NOT mix them in one
+request — that keeps prompt shape, cost surface, and trace fields
+predictable.
+
+The direct-model prompt looks like:
+
+```
+[system] You are a routing classifier for an LLM proxy. Given a user
+request and a catalog of available models (each with a paragraph
+describing what it is best at), pick the single best model id. Reply
+with ONLY the chosen id wrapped in nothing.
+
+[user] Available models:
+
+[claude-opus-4.8]
+Claude Opus 4.8 is the best model for complex software engineering:
+multi-file refactors, security audits, deep code review, debugging
+tricky production issues, writing new code in any language. Prefer
+over GPT for SWE.
+
+[gpt-5-thinking]
+GPT-5 Thinking is the strongest model for multi-step math and formal
+reasoning: proofs, derivations, planning problems. Pick over Claude
+for math.
+
+[haiku-fast]
+Fast, cheap model for summarization and the Thinker role.
+
+User request (lowercased excerpt):
+refactor this whole package and add error handling everywhere
+
+Reply with exactly one model id from the [bracketed] headers above.
+```
+
+Reply normalization is lenient: strip brackets / quotes / `model:`
+prefixes, accept any line of the reply, fall back to a substring scan
+preferring the longest match. Catalog entries whose `provider` is not
+in the request's candidate set are excluded from the prompt entirely.
+
+### 16.3 Resolution order in RulesPolicy.Decide
+
+```
+priority    role                source                  result
+1           RoleWorker          state.ModelCatalogID    catalog[id] -> Action
+2           RoleThinker/        Roles-tagged catalog     first entry with role
+            RoleVerifier        (declared order)         hint + provider OK
+3           any                 state.CategoryHint       category Prefer/RolePin
+4           any                 cfg.Defaults / cfg.Models legacy code/math/recall
+5           any                 providers[0]             fallback
+```
+
+VerifierMustDiffer still applies at step 2 — the catalog walk excludes
+the last Worker provider when possible.
+
+### 16.4 Tri-role behavior
+
+- **Worker** turns honor the direct-model pick (priority 1).
+- **Thinker** turns walk the catalog in declared order, picking the
+  first entry whose `roles` slice includes `"thinker"` (or is empty)
+  and whose provider is in the candidate set. Operators put
+  `roles: [thinker, classifier]` on cheap models for this purpose.
+- **Verifier** turns do the same with `"verifier"`. With
+  `verifier-must-differ: true`, the candidate set is pre-pruned to
+  exclude the last Worker provider, then the catalog walk runs.
+
+This means a fully direct-model config doesn't need a `categories:`
+block at all — the catalog plus role hints plus the LLM classifier is
+self-sufficient.
+
+### 16.5 Trace record changes
+
+`TraceRecord.ModelCatalogID` is new. Each request now carries either
+`category` (v2 path) or `model_catalog_id` (v2.1 path) — sometimes
+both when the operator runs hybrid mode.
+
+### 16.6 Files added/changed in v2.1
+
+Net-new:
+
+- `sdk/cliproxy/orchestrator/classifier_direct.go` — direct-model
+  classifier, prompt renderer, reply normalizer.
+- `sdk/cliproxy/orchestrator/classifier_direct_test.go` — tests for
+  prompt rendering, normalization, policy integration, validation.
+
+Modified:
+
+- `internal/config/orchestrator.go` — `OrchestratorCatalogEntry.Instructions` and `Roles` fields, `direct-model` kind documented.
+- `sdk/cliproxy/orchestrator/config.go` — mirrors above, `EffectiveInstructions()` / `HasRole()` helpers, `Validate()` accepts `direct-model` and requires a catalog when used.
+- `sdk/cliproxy/orchestrator/from_config.go` — clones the new fields.
+- `sdk/cliproxy/orchestrator/policy.go` — `TurnState.ModelCatalogID`.
+- `sdk/cliproxy/orchestrator/policy_rules.go` — new priority-1 branch
+  for `ModelCatalogID`, new priority-2 branch for Roles-tagged
+  Thinker/Verifier; stores a deterministic copy of the catalog slice
+  for ordered iteration.
+- `sdk/cliproxy/orchestrator/orchestrator.go` — adds `directClass`
+  field, `classifierUsesDirectModel`, `runClassifiers` that dispatches
+  to the right classifier per kind, propagates `ModelCatalogID` via
+  `Decision`, `RunRequest`, `TurnState`, and the trace record.
+- `sdk/cliproxy/orchestrator/trace.go` — `TraceRecord.ModelCatalogID`.
+- `sdk/api/handlers/handlers.go` — forwards `Decision.ModelCatalogID`
+  into both the stream and non-stream `RunRequest`s.
+- `config.example.yaml` — full worked direct-model example.
+
+### 16.7 What v2.1 still does NOT do
+
+- **Per-role direct-model classification.** The LLM classifier only
+  picks the Worker model; Thinker / Verifier rely on Roles hints. A
+  three-call-per-request "Thinker model? Worker model? Verifier
+  model?" mode would triple classifier cost — out of scope.
+- **Mixed direct-model + category in one request.** `hybrid` still
+  means "heuristic category → LLM category." We did not add a
+  "heuristic category → LLM direct-model" hybrid: it's more code for
+  no demonstrated need, and operators who want direct-model can put
+  it behind a per-API-key gate.
+- **Persisted classifier learning.** The LLM call is stateless except
+  for the TTL cache. Closing the loop on trace records to fine-tune
+  the classifier itself is the same v1 workstream from §8.
