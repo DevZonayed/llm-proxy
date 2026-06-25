@@ -851,6 +851,257 @@
   }
 }
 
+/* ============================================================== */
+/* Orchestrator: connected-model picker + role/family pinning UI. */
+/* ============================================================== */
+
+.orchToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 8px 0;
+}
+
+.orchToolbarHint {
+  flex: 1 1 200px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.orchSummaryRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.orchSummaryChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-secondary) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.modelPicker {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.modelPickerInput {
+  width: 100%;
+}
+
+.modelPickerMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.modelPickerWarn {
+  color: var(--warning-color, #c97a2c);
+}
+
+.modelPickerDropdown {
+  position: fixed;
+  z-index: 2010;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.18);
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.modelPickerGroupLabel {
+  padding: 8px 10px 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.modelPickerOption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  text-align: left;
+  width: 100%;
+}
+
+.modelPickerOption:hover,
+.modelPickerOptionHighlighted {
+  background: color-mix(in srgb, var(--accent-color, #3a76f0) 14%, transparent);
+}
+
+.modelPickerOptionActive {
+  background: color-mix(in srgb, var(--accent-color, #3a76f0) 22%, transparent);
+  font-weight: 600;
+}
+
+.modelPickerOptionLabel {
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.modelPickerOptionMeta {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.modelPickerCustom {
+  padding: 8px 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.modelPickerEmpty {
+  padding: 14px 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+
+.pinningRow {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1.2fr) minmax(0, 1.4fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
+}
+
+.pinningRowHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pinningKeyKind {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: color-mix(in srgb, var(--accent-color, #3a76f0) 18%, transparent);
+  color: var(--accent-color, #3a76f0);
+}
+
+.pinningKeyKindFamily {
+  background: color-mix(in srgb, #4caf50 22%, transparent);
+  color: #2e7d32;
+}
+
+.pinningKeyKindCustom {
+  background: color-mix(in srgb, var(--text-secondary) 22%, transparent);
+  color: var(--text-secondary);
+}
+
+.pinningProviderChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px dashed color-mix(in srgb, var(--border-color) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-secondary) 64%, transparent);
+}
+
+.pinningProviderChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-color, #3a76f0) 22%, transparent);
+  color: var(--accent-color, #3a76f0);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pinningProviderChipRemove {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pinningProviderPicker {
+  position: relative;
+  flex: 1 1 120px;
+  min-width: 120px;
+}
+
+.orchPresetGroup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.orchPresetButton {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.orchPresetButton:hover {
+  background: color-mix(in srgb, var(--accent-color, #3a76f0) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent-color, #3a76f0) 60%, transparent);
+}
+
+.orchPresetButtonDisabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 900px) {
+  .pinningRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 900px) {
   .payloadRuleModelRow,
   .payloadRuleModelRowProtocolFirst,

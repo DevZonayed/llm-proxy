@@ -41,12 +41,18 @@ import type {
 } from '@/types/visualConfig';
 import {
   ApiKeysCardEditor,
-  CatalogEditor,
-  CategoriesEditor,
   ClassifierEditor,
   PayloadFilterRulesEditor,
   PayloadRulesEditor,
 } from './VisualConfigEditorBlocks';
+import {
+  CatalogEditorV2,
+  CategoriesEditorV2,
+  ConnectedProvidersStrip,
+  OrchestratorImportExport,
+  RoleFamilyPinningEditor,
+  useConnectedModels,
+} from './OrchestratorBlocks';
 import styles from './VisualConfigEditor.module.scss';
 
 type VisualSectionId =
@@ -228,8 +234,34 @@ export function VisualConfigEditor({
     validationErrors?.['streaming.nonstreamKeepaliveInterval']
   );
 
+  // Connected models (used by the orchestrator pickers). Fetched lazily
+  // via the shared store cache so opening the editor on the Orchestrator
+  // section doesn't pay a network cost every time.
+  const connectedModelsState = useConnectedModels();
+
   const handleApiKeysTextChange = useCallback(
     (apiKeysText: string) => onChange({ apiKeysText }),
+    [onChange]
+  );
+
+  const handleOrchestratorImport = useCallback(
+    (patch: Partial<VisualConfigValues['orchestrator']>) => {
+      if (!patch || Object.keys(patch).length === 0) return;
+      onChange({ orchestrator: patch });
+    },
+    [onChange]
+  );
+
+  const handleOrchestratorPinningChange = useCallback(
+    ({
+      rulesDefaultsText,
+      rulesModelsText,
+    }: {
+      rulesDefaultsText: string;
+      rulesModelsText: string;
+    }) => {
+      onChange({ orchestrator: { rulesDefaultsText, rulesModelsText } });
+    },
     [onChange]
   );
   const handlePayloadDefaultRulesChange = useCallback(
@@ -1273,51 +1305,51 @@ export function VisualConfigEditor({
               </FieldShell>
 
               <SectionSubsection
-                title={t('config_management.visual.sections.orchestrator.providers_title', {
-                  defaultValue: 'Providers per role / family',
+                title={t('config_management.visual.sections.orchestrator.import_export_title', {
+                  defaultValue: 'Connected models & presets',
                 })}
                 description={t(
-                  'config_management.visual.sections.orchestrator.providers_desc',
+                  'config_management.visual.sections.orchestrator.import_export_desc',
                   {
                     defaultValue:
-                      'One "key: provider1, provider2, …" entry per line. Keys: thinker, verifier, code, math, recall, general.',
+                      'Models discovered from your connected providers (OAuth + API key + OpenAI-compat). Use Export / Import to ship a routing preset between machines as JSON.',
                   }
                 )}
               >
-                <textarea
-                  className="input"
-                  rows={6}
-                  value={values.orchestrator.rulesDefaultsText}
-                  disabled={disabled || !values.orchestrator.enabled}
-                  placeholder={
-                    'code: claude\nmath: codex\nrecall: gemini-cli\nthinker: gemini-cli\nverifier: codex'
-                  }
-                  onChange={(e) =>
-                    onChange({ orchestrator: { rulesDefaultsText: e.target.value } })
-                  }
-                />
+                <div className={styles.sectionStack}>
+                  <ConnectedProvidersStrip
+                    providers={connectedModelsState.providers}
+                    loading={connectedModelsState.loading}
+                    error={connectedModelsState.error}
+                  />
+                  <OrchestratorImportExport
+                    values={values.orchestrator}
+                    disabled={disabled}
+                    refreshing={connectedModelsState.loading}
+                    onImport={handleOrchestratorImport}
+                    onRefresh={connectedModelsState.refresh}
+                  />
+                </div>
               </SectionSubsection>
 
               <SectionSubsection
-                title={t('config_management.visual.sections.orchestrator.models_title', {
-                  defaultValue: 'Model pinning per role / family',
+                title={t('config_management.visual.sections.orchestrator.pinning_title', {
+                  defaultValue: 'Role / family pinning',
                 })}
-                description={t('config_management.visual.sections.orchestrator.models_desc', {
-                  defaultValue:
-                    'One "key: model-name" entry per line. Resolution at runtime: role-key → family-key → "default" → user\'s requested model. Each pinned model must be servable by at least one provider in the matching providers list above.',
-                })}
+                description={t(
+                  'config_management.visual.sections.orchestrator.pinning_desc',
+                  {
+                    defaultValue:
+                      'One row per role (thinker / worker / verifier) or family (code / math / recall / general / default / custom). Each row defines the allowed providers and a single pinned upstream model. Resolution at runtime: role-key → family-key → "default" → the user\'s requested model.',
+                  }
+                )}
               >
-                <textarea
-                  className="input"
-                  rows={6}
-                  value={values.orchestrator.rulesModelsText}
+                <RoleFamilyPinningEditor
+                  values={values.orchestrator}
+                  models={connectedModelsState.models}
+                  providers={connectedModelsState.providers}
                   disabled={disabled || !values.orchestrator.enabled}
-                  placeholder={
-                    'thinker: gemini-2.5-flash\nverifier: gpt-5\ncode: claude-opus-4-5-20251101\nmath: gpt-5\ndefault: gemini-2.5-pro'
-                  }
-                  onChange={(e) =>
-                    onChange({ orchestrator: { rulesModelsText: e.target.value } })
-                  }
+                  onChange={handleOrchestratorPinningChange}
                 />
               </SectionSubsection>
 
@@ -1462,15 +1494,17 @@ export function VisualConfigEditor({
 
               <SectionSubsection
                 title={t('config_management.visual.sections.orchestrator.catalog_title', {
-                  defaultValue: 'Catalog (v2)',
+                  defaultValue: 'Catalog — connected models the router can use',
                 })}
                 description={t('config_management.visual.sections.orchestrator.catalog_desc', {
                   defaultValue:
-                    'Knowledge base of upstream models the orchestrator can route to. Each entry pairs a provider with a model and carries optional metadata the classifier reads.',
+                    'One entry per upstream model. Pick a connected model from the dropdown and tell the router what it is good at. The classifier (or your Prefer list) reads these entries to route each request.',
                 })}
               >
-                <CatalogEditor
+                <CatalogEditorV2
                   value={values.orchestrator.catalog}
+                  models={connectedModelsState.models}
+                  providers={connectedModelsState.providers}
                   disabled={disabled || !values.orchestrator.enabled}
                   onChange={(catalog) => onChange({ orchestrator: { catalog } })}
                 />
@@ -1478,15 +1512,17 @@ export function VisualConfigEditor({
 
               <SectionSubsection
                 title={t('config_management.visual.sections.orchestrator.categories_title', {
-                  defaultValue: 'Categories (v2)',
+                  defaultValue: 'Categories — dynamic task buckets',
                 })}
                 description={t('config_management.visual.sections.orchestrator.categories_desc', {
                   defaultValue:
-                    'Dynamic task buckets. Each request is classified into one and routed via that category’s Prefer list of catalog ids (and optional role pins).',
+                    'Each request is classified into exactly one category and routed via that category’s Prefer list of catalog ids (with optional per-role pins).',
                 })}
               >
-                <CategoriesEditor
+                <CategoriesEditorV2
                   value={values.orchestrator.categories}
+                  catalog={values.orchestrator.catalog}
+                  models={connectedModelsState.models}
                   disabled={disabled || !values.orchestrator.enabled}
                   onChange={(categories) => onChange({ orchestrator: { categories } })}
                 />
