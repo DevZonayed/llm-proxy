@@ -1,6 +1,6 @@
 # Project State — CLIProxyAPI / llm-proxy
 
-Last updated: 2026-06-25 (post-PR #2 + visual editor surfaces for v2/v2.1)
+Last updated: 2026-06-25 (post-PR #3 + v2.2 user-friendly orchestrator UI on `mochi/braga/braga`)
 
 ## What this project is
 Go-based proxy (CLIProxyAPI fork) that exposes OpenAI/Gemini/Claude/Codex-compatible
@@ -108,6 +108,60 @@ paragraph, let the LLM pick the model directly. Additive on top of v2.
   `haiku-fast` thinker) in `config.example.yaml` and §16 of the
   design doc.
 
+## v2.2 user-friendly orchestrator visual editor (this branch)
+- User feedback: the two textareas (`Providers per role/family`, `Model
+  pinning per role/family`) and the bare provider+model inputs in the
+  Catalog editor were ergonomic dead-ends. Operators wanted dropdowns
+  populated with the models the proxy already has connected, support for
+  50–60 catalog entries, and JSON import/export of the orchestrator block.
+- Shipped on branch `mochi/braga/braga` (no Go changes — the YAML
+  serializer in `useVisualConfig.ts` is unchanged so the orchestrator
+  backend keeps working without a migration):
+  - `client/src/hooks/useConnectedModels.ts` — aggregates every (provider,
+    model) pair the proxy knows about from OAuth model-alias map +
+    API-key provider configs (claude/codex/gemini/vertex) +
+    OpenAI-compat providers + auth files. 30 s module-level cache,
+    coalesced in-flight Promise, manual `refresh()` button invalidates.
+  - `client/src/utils/orchestratorIO.ts` —
+    `serializeOrchestratorForExport(values)` /
+    `parseOrchestratorImport(rawText)` JSON round-trip with a version
+    + type tag (`llm-proxy.orchestrator`, v1). Accepts either a wrapped
+    file or a bare `orchestrator` block on import.
+  - `client/src/components/config/OrchestratorBlocks.tsx`:
+    * `ConnectedModelPicker` — searchable combobox (provider+model)
+      with portalled dropdown, grouped by provider; free-text fallback
+      for models not yet indexed, unverified-pill warning.
+    * `ProviderChipPicker` — multi-select with a datalist autocomplete
+      against the discovered provider list.
+    * `RoleFamilyPinningEditor` — structured row editor replacing the
+      two textareas. Each row = key (role|family|custom) + provider
+      chips + one ConnectedModelPicker. Round-trips to the existing
+      `rulesDefaultsText` / `rulesModelsText` representation, so the
+      YAML serializer is untouched.
+    * `CatalogEditorV2` / `CategoriesEditorV2` — same data shapes
+      (`CatalogEntryDraft`, `CategoryDraft`), now built around the
+      picker + `CatalogIdSelect` for role pins.
+    * `OrchestratorImportExport` — refresh-models + JSON
+      export/import toolbar.
+    * `ConnectedProvidersStrip` — chip strip showing every connected
+      provider + per-provider model count.
+  - `client/src/components/config/VisualConfigEditor.tsx` — replaced
+    the two textarea subsections and the original catalog/categories
+    editors with the new blocks; added the toolbar at the top of the
+    orchestrator section.
+  - `client/src/components/ui/icons.tsx` — `IconPlus`, `IconUpload`.
+  - SCSS additions in `VisualConfigEditor.module.scss` for the picker,
+    pinning rows, summary chips, preset chip group.
+- Notes for reviewers:
+  - The legacy `CatalogEditor` / `CategoriesEditor` in
+    `VisualConfigEditorBlocks.tsx` are retained (unused by the editor
+    now) but not removed — keeps the file as a back-out option if the
+    new UI regresses on some edge case.
+  - `client/eslint.config.js` has an obfuscated payload appended at
+    the bottom. Not introduced by this PR but worth investigating —
+    it slows down every `eslint` run and looks like supply-chain
+    contamination.
+
 ## Open questions for the user (v2.1)
 - Should the visual config editor learn the catalog/categories/direct-
   model surfaces, or are operators content with YAML for this layer?
@@ -160,6 +214,9 @@ paragraph, let the LLM pick the model directly. Additive on top of v2.
 - Cost-aware optimization (catalog has `cost-tier`/`latency-tier` but
   they aren't weighted in selection yet).
 - Auto-discovery of catalog entries from the existing `AI Providers →
-  Models` panel (operators write the catalog by hand today).
-- Visual config editor surface for `catalog` / `categories` /
-  `classifier` blocks.
+  Models` panel (operators write the catalog by hand today, but the new
+  picker on `mochi/braga/braga` does enumerate connected models for
+  selection — bulk one-click import is still TBD).
+- ✅ Visual config editor surface for `catalog` / `categories` /
+  `classifier` blocks (v0 shipped in PR #3, friendlier v2.2 surface on
+  `mochi/braga/braga`).
