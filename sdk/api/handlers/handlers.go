@@ -621,6 +621,8 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 					Headers:         hdrs,
 					Alt:             alt,
 					APIKey:          apiKey,
+					CategoryHint:    decision.CategoryHint,
+					ModelCatalogID:  decision.ModelCatalogID,
 					Metadata:        reqMeta,
 				})
 				if errRun == nil {
@@ -633,6 +635,11 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 			}
 			if len(decision.Providers) > 0 {
 				providers = decision.Providers
+			}
+			if decision.NormalizedModel != "" {
+				// Honor catalog-driven model pin for single-shot dispatch.
+				normalizedModel = decision.NormalizedModel
+				reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 			}
 		}
 	}
@@ -763,6 +770,8 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					Headers:         hdrs,
 					Alt:             alt,
 					APIKey:          apiKey,
+					CategoryHint:    decision.CategoryHint,
+					ModelCatalogID:  decision.ModelCatalogID,
 					Metadata:        reqMeta,
 				})
 				if errRun == nil {
@@ -805,6 +814,11 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 			if len(decision.Providers) > 0 {
 				providers = decision.Providers
+			}
+			if decision.NormalizedModel != "" {
+				// Honor catalog-driven model pin for single-shot stream.
+				normalizedModel = decision.NormalizedModel
+				reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 			}
 		}
 	}

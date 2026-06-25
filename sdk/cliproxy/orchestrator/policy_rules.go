@@ -10,16 +10,56 @@ import (
 // the request payload. It is the v0 default and serves both as the
 // shipping policy and as the fallback for the learned variant.
 //
-// The policy is deterministic and cheap: a few regex checks against the
-// raw request payload bytes and a lookup into the configured per-family
-// provider ordering.
+// The policy is deterministic and cheap: a category lookup against the
+// optional Catalog + Categories tables, falling back to a few regex
+// checks against the raw request payload bytes and a lookup into the
+// configured per-family provider ordering when no category matches.
 type RulesPolicy struct {
-	cfg RulesConfig
+	cfg          RulesConfig
+	catalog      *catalogIndex // nil-safe
+	catalogOrder []CatalogEntry // declared order, for deterministic Roles iteration
+	categories   []Category
 }
 
-// NewRulesPolicy constructs a RulesPolicy from configuration.
-func NewRulesPolicy(cfg RulesConfig) *RulesPolicy {
-	return &RulesPolicy{cfg: cfg}
+// NewRulesPolicy constructs a RulesPolicy from configuration. Pass nil
+// for catalog and categories to keep the legacy provider-family
+// routing — every existing config still works.
+func NewRulesPolicy(cfg RulesConfig, opts ...RulesPolicyOption) *RulesPolicy {
+	p := &RulesPolicy{
+		cfg:     cfg,
+		catalog: newCatalogIndex(nil),
+	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
+}
+
+// RulesPolicyOption customizes a RulesPolicy at construction time. We
+// use functional options instead of widening the constructor signature
+// so existing callers and tests (NewRulesPolicy(cfg)) keep compiling.
+type RulesPolicyOption func(*RulesPolicy)
+
+// WithCatalog wires a model catalog into the rules policy. The catalog
+// is consulted when a request matches a Category (see WithCategories),
+// when the direct-model classifier picks a specific id (state.
+// ModelCatalogID), or to satisfy Thinker/Verifier roles via per-entry
+// Roles hints. Pass nil for no catalog.
+func WithCatalog(catalog []CatalogEntry) RulesPolicyOption {
+	return func(p *RulesPolicy) {
+		p.catalog = newCatalogIndex(catalog)
+		p.catalogOrder = append([]CatalogEntry(nil), catalog...)
+	}
+}
+
+// WithCategories wires the dynamic category table into the rules
+// policy. When a request's CategoryHint matches one of these,
+// preference resolution uses the category's Prefer / RolePins lists
+// instead of the legacy cfg.Defaults table.
+func WithCategories(categories []Category) RulesPolicyOption {
+	return func(p *RulesPolicy) {
+		p.categories = append([]Category(nil), categories...)
+	}
 }
 
 // Decide implements Policy.
@@ -29,16 +69,60 @@ func (p *RulesPolicy) Decide(ctx context.Context, state TurnState) (Action, erro
 	}
 
 	role := p.roleForTurn(state)
+
+	// Direct-model path: highest-priority signal. For the Worker
+	// role, when the orchestrator's direct-model classifier picked a
+	// specific catalog entry, route there. Thinker / Verifier turns
+	// don't get a direct-model pick (the classifier prompts only the
+	// Worker model); they fall through to Roles-tagged entries below.
+	if role == RoleWorker && state.ModelCatalogID != "" {
+		if entry, ok := p.catalog.Get(state.ModelCatalogID); ok {
+			if providerInSet(entry.Provider, state.Providers) {
+				return Action{
+					Provider: entry.Provider,
+					Model:    entry.Model,
+					Role:     role,
+					Halt:     false,
+				}, nil
+			}
+		}
+	}
+
+	// Roles-tagged catalog path: for Thinker / Verifier turns in
+	// direct-model mode (or any mode where the catalog declares which
+	// entries are good as planners/verifiers), pick the first catalog
+	// entry whose Roles slice includes the current role and whose
+	// provider is in the candidate set.
+	if role != RoleWorker {
+		if entry, ok := p.pickCatalogByRole(role, state); ok {
+			return Action{
+				Provider: entry.Provider,
+				Model:    entry.Model,
+				Role:     role,
+				Halt:     false,
+			}, nil
+		}
+	}
+
+	// Category-aware path: if the orchestrator pre-classified this
+	// request into a configured category and that category has at
+	// least one usable Prefer/RolePin entry, route through the
+	// catalog.
+	if state.CategoryHint != "" {
+		if cat, ok := p.findCategory(state.CategoryHint); ok {
+			if act, ok := p.actionFromCategory(cat, role, state); ok {
+				return act, nil
+			}
+		}
+	}
+
+	// Legacy domain-family path.
 	family := classifyDomain(state)
-
-	// Build the preferred provider list for this turn.
 	preferred := p.preferredProvidersFor(role, family, state)
-
 	provider := pickFirstAvailable(preferred, state.Providers)
 	if provider == "" {
 		provider = state.Providers[0]
 	}
-
 	model := p.modelFor(role, family, state.UserModelHint)
 
 	return Action{
@@ -47,6 +131,110 @@ func (p *RulesPolicy) Decide(ctx context.Context, state TurnState) (Action, erro
 		Role:     role,
 		Halt:     false,
 	}, nil
+}
+
+// findCategory returns the configured Category struct for the supplied
+// name, or zero-value + false. Lookup is case-insensitive.
+func (p *RulesPolicy) findCategory(name string) (Category, bool) {
+	for _, cat := range p.categories {
+		if strings.EqualFold(strings.TrimSpace(cat.Name), strings.TrimSpace(name)) {
+			return cat, true
+		}
+	}
+	return Category{}, false
+}
+
+// pickCatalogByRole walks the catalog in declared order and returns
+// the first entry that (a) carries the requested role hint via its
+// Roles slice and (b) has its Provider in the candidate set. The role
+// hint match is case-insensitive; entries with an empty Roles slice
+// are treated as "any role" so a sparse catalog still produces a hit.
+//
+// For Verifier turns, the policy also honours VerifierMustDiffer by
+// excluding the last Worker provider from the candidate set before
+// walking the catalog.
+func (p *RulesPolicy) pickCatalogByRole(role Role, state TurnState) (CatalogEntry, bool) {
+	if p == nil || p.catalog == nil || len(p.catalog.byID) == 0 {
+		return CatalogEntry{}, false
+	}
+	available := state.Providers
+	if role == RoleVerifier && p.cfg.VerifierMustDiffer {
+		if last := lastTurnByRole(state, RoleWorker); last != nil {
+			pruned := excludeProvider(available, last.Provider)
+			if len(pruned) > 0 {
+				available = pruned
+			}
+		}
+	}
+	set := make(map[string]struct{}, len(available))
+	for _, prov := range available {
+		set[prov] = struct{}{}
+	}
+	// We rely on the catalog being iterated in some stable order. The
+	// underlying map iteration is not stable, so we re-iterate the
+	// per-entry slice by querying byID via the keys collected in the
+	// catalogIndex. For deterministic order we fall back to the
+	// original Catalog slice stored on the RulesPolicy when present.
+	for _, e := range p.catalogSlice() {
+		if !e.HasRole(role.String()) {
+			continue
+		}
+		if _, ok := set[e.Provider]; ok {
+			return e, true
+		}
+	}
+	return CatalogEntry{}, false
+}
+
+// catalogSlice returns the catalog entries in their declared order so
+// pickCatalogByRole iterates deterministically. The catalogIndex's
+// internal map iteration is non-deterministic, so we keep a parallel
+// slice on RulesPolicy when WithCatalog is used.
+func (p *RulesPolicy) catalogSlice() []CatalogEntry {
+	if p == nil {
+		return nil
+	}
+	return p.catalogOrder
+}
+
+// actionFromCategory resolves a (category, role) pair to a routing
+// Action. Returns ok=false when the category has no usable preference
+// for this candidate provider set, letting the caller fall back to the
+// legacy path.
+//
+// Resolution order:
+//  1. Verifier turns with VerifierMustDiffer first try the category's
+//     Prefer/RolePins after excluding the last Worker provider.
+//  2. RolePins for the current role.
+//  3. Category.Prefer walked in order.
+func (p *RulesPolicy) actionFromCategory(cat Category, role Role, state TurnState) (Action, bool) {
+	if p.catalog == nil {
+		return Action{}, false
+	}
+
+	available := state.Providers
+	if role == RoleVerifier && p.cfg.VerifierMustDiffer {
+		if last := lastTurnByRole(state, RoleWorker); last != nil {
+			pruned := excludeProvider(available, last.Provider)
+			if len(pruned) > 0 {
+				available = pruned
+			}
+		}
+	}
+
+	entry, ok := p.catalog.pickForRole(cat, role.String(), available)
+	if !ok {
+		// Worker fallback: many configs only pin RolePins for thinker /
+		// verifier, leaving Worker to Prefer. If pickForRole already
+		// walked Prefer we have nothing more to try here.
+		return Action{}, false
+	}
+	return Action{
+		Provider: entry.Provider,
+		Model:    entry.Model,
+		Role:     role,
+		Halt:     false,
+	}, true
 }
 
 // modelFor picks the upstream model name for an outbound role turn. It
