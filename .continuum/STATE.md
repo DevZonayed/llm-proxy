@@ -1,6 +1,6 @@
 # Project State — CLIProxyAPI / llm-proxy
 
-Last updated: 2026-06-24 (post-PR #1 follow-up)
+Last updated: 2026-06-24 (post-PR #1 + v2 catalog/categories + v2.1 direct-model)
 
 ## What this project is
 Go-based proxy (CLIProxyAPI fork) that exposes OpenAI/Gemini/Claude/Codex-compatible
@@ -37,6 +37,72 @@ static model aliasing, OpenAI-compatible upstreams, Amp CLI support, embeddable 
 - Worked example "gemini-flash plans, claude-opus codes, gpt-5 verifies"
   lives in `config.example.yaml` (commented block) and in §7 of the
   design doc.
+
+## v2 routing policy: catalog + categories + LLM classifier (this branch)
+The 3-line `defaults: {code, math, recall}` table didn't scale past a
+handful of providers. v2 adds, additively (legacy still works):
+- `orchestrator.catalog`: list of `{id, provider, model, tags,
+  description, cost-tier, latency-tier, context-window, supports}`
+  entries. The knowledge base of upstream models.
+- `orchestrator.categories`: dynamic, user-defined task buckets with
+  `{name, instructions, match{keywords|regex|require-code-block|
+  min/max-tokens|require-tools|any-of|none-of}, prefer[catalog ids],
+  role-pins{thinker|worker|verifier}}`.
+- `orchestrator.classifier`: `kind: heuristic|llm|hybrid`. When
+  `llm`/`hybrid` and `llm.enabled`, the orchestrator calls
+  `llm.provider`/`llm.model` (must be in the candidate set) via
+  `AuthManager.Execute` with a short routing prompt, caches by hash,
+  falls back to heuristic / `default-category` / fail per
+  `fallback-on-error`.
+- Resolution order: category Prefer/RolePins → legacy
+  `defaults`/`models` → first candidate. Account selection inside the
+  chosen provider is still `Selector.Pick`.
+- New files: `sdk/cliproxy/orchestrator/{categories.go,
+  category_input.go, classifier_llm.go, categories_test.go}`.
+- Modified: `internal/config/orchestrator.go`, `sdk/config/config.go`,
+  `sdk/cliproxy/orchestrator/{config.go, from_config.go, policy.go,
+  policy_rules.go, orchestrator.go, trace.go}`,
+  `sdk/api/handlers/handlers.go`, `config.example.yaml`,
+  `docs/fugu-orchestrator-design.md` (new §15).
+- `Decision` now carries `CategoryHint` + `NormalizedModel`; handler
+  forwards both into `RunRequest`. The single-shot path honors
+  `Decision.NormalizedModel` so per-category model pins reach the
+  executor without further plumbing.
+- Visual config editor for v2 fields is NOT yet built — catalog and
+  categories are YAML-only this iteration. Adding a Catalog + Categories
+  section to the React `VisualConfigEditor.tsx` is a follow-up PR.
+
+## v2.1 direct-model routing (no categories required)
+The simpler mental model the user asked for: describe each model in a
+paragraph, let the LLM pick the model directly. Additive on top of v2.
+- `CatalogEntry.Instructions` (paragraph) — what this entry is best
+  at. The direct-model classifier sees it.
+- `CatalogEntry.Roles` (free-form list — `[thinker]`, `[worker]`,
+  `[verifier]`, `[classifier]`, etc.) — soft role hints for tri-role.
+  Empty = eligible for any role.
+- `classifier.kind: direct-model` — new mode. LLM picks a CATALOG ID,
+  not a category name. Validation requires non-empty `catalog`.
+- New `sdk/cliproxy/orchestrator/classifier_direct.go` +
+  `classifier_direct_test.go`. Reuses the existing TTL cache,
+  provider-must-be-in-candidate-set guard, and reply normalization
+  patterns from the category classifier.
+- `Decision.ModelCatalogID` and `RunRequest.ModelCatalogID` plumbed
+  through; handler.go forwards both stream and non-stream paths.
+- `TurnState.ModelCatalogID` is the highest-priority signal in
+  `RulesPolicy.Decide` (priority 1, Worker only). Priority 2 is the
+  Roles-tagged catalog walk for Thinker/Verifier. Priority 3 is the
+  v2 category path. Priority 4 is legacy code/math/recall.
+- `TraceRecord.ModelCatalogID` joins `category` in the trace JSON.
+- Worked example (`claude-opus-4.8` SWE / `gpt-5-thinking` math /
+  `haiku-fast` thinker) in `config.example.yaml` and §16 of the
+  design doc.
+
+## Open questions for the user (v2.1)
+- Should the visual config editor learn the catalog/categories/direct-
+  model surfaces, or are operators content with YAML for this layer?
+- Worth adding a 3-call-per-request "per-role direct-model" mode (ask
+  the classifier separately which Thinker, Worker, Verifier to use)?
+  Triples classifier cost; not yet implemented.
 - Open threads (from §14 of the design doc):
   1. Streaming-after-ACCEPT strategy: (A) re-issue Worker as stream
      [default] vs. (B) buffer-and-flush.
@@ -80,3 +146,9 @@ static model aliasing, OpenAI-compatible upstreams, Amp CLI support, embeddable 
 - Validation that a pinned model is actually servable by at least one
   provider in the matching `defaults` list — today this is enforced by the
   dispatch layer at request time (request will error if unservable).
+- Cost-aware optimization (catalog has `cost-tier`/`latency-tier` but
+  they aren't weighted in selection yet).
+- Auto-discovery of catalog entries from the existing `AI Providers →
+  Models` panel (operators write the catalog by hand today).
+- Visual config editor surface for `catalog` / `categories` /
+  `classifier` blocks.

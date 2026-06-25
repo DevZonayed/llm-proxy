@@ -40,6 +40,153 @@ type Config struct {
 
 	// Trace controls the per-request decision recorder.
 	Trace TraceConfig
+
+	// Catalog is the shared knowledge base of upstream models. The rules
+	// policy consults the catalog when a request matches a category, so
+	// the orchestrator can route to a specific (provider, model) pair
+	// rather than relying on coarse provider-family tables. Optional.
+	Catalog []CatalogEntry
+
+	// Categories describes the dynamic task buckets the request is
+	// classified into. The first matching category (heuristic) or the
+	// category returned by the LLM classifier wins. Optional.
+	Categories []Category
+
+	// Classifier configures how a request is bucketed into a category.
+	Classifier ClassifierConfig
+}
+
+// CatalogEntry mirrors internalconfig.OrchestratorCatalogEntry in the
+// orchestrator package's own form. See the YAML-tagged struct for field
+// documentation.
+type CatalogEntry struct {
+	ID            string
+	Provider      string
+	Model         string
+	Tags          []string
+	Description   string
+	Instructions  string
+	Roles         []string
+	CostTier      string
+	LatencyTier   string
+	ContextWindow int
+	Supports      []string
+}
+
+// EffectiveInstructions returns the paragraph-level instructions for
+// this catalog entry, falling back to Description when Instructions is
+// blank. Used by the direct-model classifier when rendering the
+// routing prompt.
+func (e CatalogEntry) EffectiveInstructions() string {
+	if s := strings.TrimSpace(e.Instructions); s != "" {
+		return s
+	}
+	return strings.TrimSpace(e.Description)
+}
+
+// HasRole reports whether the supplied role hint appears in the
+// entry's Roles slice (case-insensitive). Empty Roles is treated as
+// "any role" — the entry is eligible for every role.
+func (e CatalogEntry) HasRole(role string) bool {
+	if len(e.Roles) == 0 {
+		return true
+	}
+	want := strings.ToLower(strings.TrimSpace(role))
+	for _, r := range e.Roles {
+		if strings.EqualFold(strings.TrimSpace(r), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// EffectiveID returns the entry's ID, falling back to Model when ID is
+// blank. Catalog IDs are referenced from category Prefer lists.
+func (e CatalogEntry) EffectiveID() string {
+	if strings.TrimSpace(e.ID) != "" {
+		return e.ID
+	}
+	return e.Model
+}
+
+// HasTag reports whether the supplied tag is present in the entry's
+// Tags slice. Comparison is case-insensitive.
+func (e CatalogEntry) HasTag(tag string) bool {
+	want := strings.ToLower(strings.TrimSpace(tag))
+	for _, t := range e.Tags {
+		if strings.EqualFold(strings.TrimSpace(t), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// CategoryMatch is the deterministic match predicate for a single
+// category. All non-zero predicates must hold for the category to match
+// (logical AND across predicates).
+type CategoryMatch struct {
+	Keywords         []string
+	Regex            []string
+	RequireCodeBlock bool
+	MinTokens        int
+	MaxTokens        int
+	RequireTools     bool
+	AnyOf            []string
+	NoneOf           []string
+}
+
+// Category mirrors internalconfig.OrchestratorCategory in the
+// orchestrator package's own form.
+type Category struct {
+	Name         string
+	Instructions string
+	Match        CategoryMatch
+	Prefer       []string
+	RolePins     map[string]string
+}
+
+// PinFor returns the catalog id pinned for the supplied role name, or
+// the empty string when no pin is configured. Role lookup is
+// case-insensitive.
+func (c Category) PinFor(role string) string {
+	if len(c.RolePins) == 0 {
+		return ""
+	}
+	want := strings.ToLower(strings.TrimSpace(role))
+	for k, v := range c.RolePins {
+		if strings.EqualFold(strings.TrimSpace(k), want) {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// ClassifierConfig configures how a request is classified into one of
+// the configured Categories.
+type ClassifierConfig struct {
+	// Kind is "heuristic" (default), "llm", or "hybrid".
+	Kind string
+
+	Heuristic ClassifierHeuristicConfig
+	LLM       ClassifierLLMConfig
+}
+
+// ClassifierHeuristicConfig tunes the deterministic matcher.
+type ClassifierHeuristicConfig struct {
+	FirstMatchWins bool
+}
+
+// ClassifierLLMConfig tunes the optional LLM-based classifier.
+type ClassifierLLMConfig struct {
+	Enabled         bool
+	Provider        string
+	Model           string
+	Timeout         time.Duration
+	CacheTTL        time.Duration
+	MaxInputChars   int
+	PromptTemplate  string
+	FallbackOnError string
+	DefaultCategory string
 }
 
 // PolicyConfig selects between the rules-based policy and the learned
@@ -201,6 +348,21 @@ func Default() Config {
 			KeepFullWorkerPayloads:  false,
 			RotateMB:                64,
 		},
+		Catalog:    nil,
+		Categories: nil,
+		Classifier: ClassifierConfig{
+			Kind: "heuristic",
+			Heuristic: ClassifierHeuristicConfig{
+				FirstMatchWins: true,
+			},
+			LLM: ClassifierLLMConfig{
+				Enabled:         false,
+				Timeout:         800 * time.Millisecond,
+				CacheTTL:        5 * time.Minute,
+				MaxInputChars:   4000,
+				FallbackOnError: "heuristic",
+			},
+		},
 	}
 }
 
@@ -233,7 +395,117 @@ func (c Config) Validate() error {
 	if c.Difficulty.HardTokenThreshold < c.Difficulty.MediumTokenThreshold {
 		return errors.New("orchestrator: difficulty.hard-token-threshold must be >= medium-token-threshold")
 	}
+	if err := c.validateCatalogCategories(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validateCatalogCategories checks the new catalog/categories tables for
+// internal consistency. The orchestrator can still run with neither
+// configured (legacy provider-family routing takes over); when either is
+// present, both must agree.
+func (c Config) validateCatalogCategories() error {
+	classifierKindFirst := strings.ToLower(strings.TrimSpace(c.Classifier.Kind))
+	// `direct-model` MUST have a non-empty catalog regardless of whether
+	// categories are configured — there is nothing for the classifier to
+	// pick from otherwise.
+	if classifierKindFirst == "direct-model" && len(c.Catalog) == 0 {
+		return errors.New("orchestrator: classifier.kind 'direct-model' requires a non-empty catalog")
+	}
+	if len(c.Catalog) == 0 && len(c.Categories) == 0 {
+		return nil
+	}
+	// Build the catalog index by effective id.
+	idx := make(map[string]struct{}, len(c.Catalog))
+	for i, e := range c.Catalog {
+		id := e.EffectiveID()
+		if strings.TrimSpace(id) == "" {
+			return errors.New("orchestrator: catalog entry " + itoa(i) + " is missing id and model")
+		}
+		if strings.TrimSpace(e.Provider) == "" {
+			return errors.New("orchestrator: catalog entry " + id + " is missing provider")
+		}
+		if _, dup := idx[id]; dup {
+			return errors.New("orchestrator: catalog entry id is not unique: " + id)
+		}
+		idx[id] = struct{}{}
+	}
+	// Validate each category references catalog ids that exist.
+	classifierKind := strings.ToLower(strings.TrimSpace(c.Classifier.Kind))
+	for _, cat := range c.Categories {
+		if strings.TrimSpace(cat.Name) == "" {
+			return errors.New("orchestrator: category is missing name")
+		}
+		for _, id := range cat.Prefer {
+			if id == "" {
+				continue
+			}
+			if _, ok := idx[id]; !ok {
+				return errors.New("orchestrator: category " + cat.Name + " prefers unknown catalog id " + id)
+			}
+		}
+		for role, id := range cat.RolePins {
+			if id == "" {
+				continue
+			}
+			if _, ok := idx[id]; !ok {
+				return errors.New("orchestrator: category " + cat.Name + " role-pin " + role + " references unknown catalog id " + id)
+			}
+		}
+	}
+	switch classifierKind {
+	case "", "heuristic", "llm", "direct-model", "hybrid":
+		// OK
+	default:
+		return errors.New("orchestrator: classifier.kind must be 'heuristic', 'llm', 'direct-model', or 'hybrid'")
+	}
+	if classifierKind == "llm" || classifierKind == "direct-model" || classifierKind == "hybrid" {
+		llm := c.Classifier.LLM
+		if llm.Enabled && strings.TrimSpace(llm.Model) == "" {
+			return errors.New("orchestrator: classifier.llm.model is required when llm classifier is enabled")
+		}
+	}
+	if classifierKind == "direct-model" && len(c.Catalog) == 0 {
+		return errors.New("orchestrator: classifier.kind 'direct-model' requires a non-empty catalog")
+	}
+	if def := strings.TrimSpace(c.Classifier.LLM.DefaultCategory); def != "" {
+		found := false
+		for _, cat := range c.Categories {
+			if strings.EqualFold(strings.TrimSpace(cat.Name), def) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("orchestrator: classifier.llm.default-category " + def + " is not a configured category")
+		}
+	}
+	return nil
+}
+
+// itoa is a tiny local helper so we don't pull strconv just for two
+// validation messages.
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	pos := len(buf)
+	neg := i < 0
+	if neg {
+		i = -i
+	}
+	for i > 0 {
+		pos--
+		buf[pos] = byte('0' + i%10)
+		i /= 10
+	}
+	if neg {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
 }
 
 // modeNormalized returns the lowercase canonical mode for runtime dispatch.

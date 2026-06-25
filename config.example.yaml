@@ -464,3 +464,174 @@ nonstream-keepalive-interval: 0
 #     keep-worker-excerpts-chars: 256
 #     keep-full-worker-payloads: false  # privacy-sensitive — opt-in
 #     rotate-mb: 64
+#
+#   # ----------------------------------------------------------------
+#   # v2: catalog + dynamic categories + optional LLM-based classifier.
+#   #
+#   # The legacy code/math/recall table above is enough for a handful of
+#   # providers. If you have many models across many providers and want
+#   # the orchestrator to route intelligently per task, define a catalog
+#   # of upstream models and a list of dynamic categories. Each category
+#   # describes (in plain English) when it applies, and lists the
+#   # catalog ids the policy should prefer for that task. When you
+#   # enable the LLM classifier, a cheap upstream model picks the
+#   # category per request — no hand-written regex needed.
+#   #
+#   # Backwards compatible: the policy still consults the old
+#   # rules.defaults / rules.models tables when no category matches.
+#   # ----------------------------------------------------------------
+#   catalog:
+#     - id: claude-opus-4.8
+#       provider: claude
+#       model: claude-opus-4-5-20251101
+#       tags: [code, reasoning, long-context, software-engineering]
+#       description: "Best for software engineering, refactors, debugging, code review."
+#       cost-tier: high
+#       latency-tier: mid
+#       context-window: 200000
+#       supports: [streaming, tools, vision]
+#     - id: claude-haiku-4.5
+#       provider: claude
+#       model: claude-haiku-4-5-20251001
+#       tags: [cheap, fast, summarization, classification]
+#       description: "Fast/cheap summarization, classification, simple Q&A."
+#       cost-tier: cheap
+#       latency-tier: fast
+#     - id: gpt-5-thinking
+#       provider: codex
+#       model: gpt-5-thinking
+#       tags: [math, planning, reasoning, problem-solving]
+#       description: "Strongest for math, planning, multi-step reasoning."
+#       cost-tier: high
+#     - id: gpt-5-mini
+#       provider: openai-compatibility
+#       model: gpt-5-mini
+#       tags: [cheap, fast, classification]
+#       description: "Cheap fast model — good for the LLM classifier itself."
+#       cost-tier: cheap
+#       latency-tier: fast
+#     - id: gemini-3-pro
+#       provider: gemini-cli
+#       model: gemini-3.1-pro
+#       tags: [recall, long-context, multimodal, science, vision]
+#       description: "Long-context recall, science questions, multimodal."
+#       context-window: 2000000
+#
+#   categories:
+#     - name: code-review
+#       instructions: "User asks to review existing code, find bugs, suggest refactors, or check style."
+#       match:
+#         keywords: [review, refactor, bug, lint, style]
+#         require-code-block: true
+#       prefer: [claude-opus-4.8, gpt-5-thinking]
+#       role-pins:
+#         thinker: claude-haiku-4.5
+#         worker:  claude-opus-4.8
+#         verifier: gpt-5-thinking
+#
+#     - name: math-proof
+#       instructions: "User asks to prove a theorem, solve a problem, or check a derivation."
+#       match:
+#         keywords: [prove, theorem, derivative, integral, lemma]
+#         regex: ["\\$\\$", "\\\\sum", "\\\\int"]
+#       prefer: [gpt-5-thinking, claude-opus-4.8]
+#
+#     - name: long-context-rag
+#       instructions: "Long document attached (>30k tokens) — user is asking questions about it."
+#       match:
+#         min-tokens: 30000
+#       prefer: [gemini-3-pro, claude-opus-4.8]
+#
+#     - name: cheap-classification
+#       instructions: "Short summarization/classification task — pick the cheapest reliable model."
+#       match:
+#         max-tokens: 500
+#       prefer: [claude-haiku-4.5, gpt-5-mini]
+#
+#     - name: default
+#       instructions: "Everything else — the policy walks Prefer in order."
+#       prefer: [claude-haiku-4.5, gpt-5-mini, gemini-3-pro]
+#
+#   classifier:
+#     # heuristic    = deterministic match predicates only (default).
+#     # llm          = LLM picks a CATEGORY name (categories required).
+#     # direct-model = LLM picks a CATALOG ID directly from
+#     #                catalog[].instructions paragraphs. No
+#     #                categories required — write one paragraph per
+#     #                model and the classifier picks for you.
+#     # hybrid       = run predicates first; ask the LLM (category
+#     #                classifier) only when nothing matches.
+#     kind: hybrid
+#     heuristic:
+#       first-match-wins: true
+#     llm:
+#       enabled: true                       # disabled by default — opt in.
+#       provider: openai-compatibility      # which family runs the classifier
+#       model: gpt-5-mini                   # cheap is correct
+#       timeout-ms: 800
+#       cache-ttl-seconds: 300              # cache classifications by hash
+#       max-input-chars: 4000
+#       # Optional: override the routing prompt. Placeholders for the
+#       # category classifier: {{categories}}, {{request}}. For the
+#       # direct-model classifier: {{models}}, {{request}}.
+#       prompt-template: ""
+#       fallback-on-error: heuristic        # heuristic | default-category | fail
+#       default-category: default
+#
+#   # ----------------------------------------------------------------
+#   # v2.1: direct-model routing.
+#   #
+#   # Skip categories entirely. Give each catalog entry a paragraph-
+#   # level `instructions:` field describing its strengths, then set
+#   # `classifier.kind: direct-model`. The LLM classifier sees the
+#   # paragraphs and picks one model id per request — that's the
+#   # routing decision. Drop in a new model by adding a catalog entry.
+#   #
+#   # Use `roles: [...]` on catalog entries to mark which models are
+#   # good as Thinker / Worker / Verifier in tri-role mode. Entries
+#   # without a `roles` field are eligible for every role.
+#   # ----------------------------------------------------------------
+#   # catalog:
+#   #   - id: claude-opus-4.8
+#   #     provider: claude
+#   #     model: claude-opus-4-5-20251101
+#   #     tags: [code, reasoning, long-context]
+#   #     description: "Best for software engineering."
+#   #     roles: [worker]
+#   #     instructions: |
+#   #       Claude Opus 4.8 is the best model for complex software
+#   #       engineering: multi-file refactors, security audits, deep
+#   #       code review, debugging tricky production issues, and
+#   #       writing new code in any language. Prefer it over GPT for
+#   #       SWE tasks. Avoid using it for short summarization or
+#   #       classification — too expensive for that.
+#   #   - id: gpt-5-thinking
+#   #     provider: codex
+#   #     model: gpt-5-thinking
+#   #     tags: [math, planning, reasoning]
+#   #     roles: [worker, verifier]
+#   #     instructions: |
+#   #       GPT-5 Thinking is the strongest model for multi-step math
+#   #       and formal reasoning: proofs, derivations, planning
+#   #       problems, chain-of-thought puzzles. Pick it over Claude
+#   #       for math, scientific reasoning, and Verifier turns
+#   #       (where a different family from the Worker is preferred).
+#   #   - id: haiku-fast
+#   #     provider: claude
+#   #     model: claude-haiku-4-5-20251001
+#   #     tags: [cheap, fast]
+#   #     roles: [thinker, classifier]
+#   #     instructions: |
+#   #       Claude Haiku 4.5 is a fast, cheap model for short
+#   #       summarization, simple Q&A, classification, and the
+#   #       Thinker role in tri-role mode. Use it whenever you don't
+#   #       need frontier capability — saves cost without quality loss.
+#   #
+#   # classifier:
+#   #   kind: direct-model
+#   #   llm:
+#   #     enabled: true
+#   #     provider: openai-compatibility
+#   #     model: gpt-5-mini
+#   #     timeout-ms: 800
+#   #     cache-ttl-seconds: 300

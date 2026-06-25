@@ -127,6 +127,24 @@ type TurnState struct {
 
 	// Budget is the maximum number of turns the runner is willing to run.
 	Budget int
+
+	// CategoryHint is the category name the orchestrator pre-classified
+	// the request into, or "" when no category matched. The rules policy
+	// consults the configured Catalog/Categories tables first; when
+	// CategoryHint is empty it falls back to the legacy domain
+	// heuristic. The hint is stable across all turns of a single
+	// request — re-classification mid-loop is intentionally avoided.
+	CategoryHint string
+
+	// ModelCatalogID is set when the direct-model classifier picks a
+	// specific catalog entry for the request. The rules policy uses
+	// this as the highest-priority signal for the Worker role: look
+	// the entry up in the catalog and route to its (provider, model)
+	// directly. Empty when direct-model classification was skipped
+	// or returned no match. Thinker/Verifier turns ignore this hint
+	// and fall back to category role-pins or Roles-tagged catalog
+	// entries.
+	ModelCatalogID string
 }
 
 // Policy decides what to do on each turn of an orchestrated request.

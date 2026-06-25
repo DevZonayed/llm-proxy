@@ -25,11 +25,14 @@ type AuthManager interface {
 // Orchestrator is the public entry point. Construct one per running
 // server via New. Methods are safe for concurrent use.
 type Orchestrator struct {
-	cfg        Config
-	policy     Policy
-	classifier *Classifier
-	recorder   *TraceRecorder
-	mgr        AuthManager
+	cfg         Config
+	policy      Policy
+	classifier  *Classifier
+	catClass    *categoryClassifier
+	llmClass    *llmCategoryClassifier // nil when LLM category classifier is disabled
+	directClass *directModelClassifier // nil when direct-model classifier is disabled
+	recorder    *TraceRecorder
+	mgr         AuthManager
 
 	mu     sync.Mutex
 	closed bool
@@ -50,19 +53,74 @@ func New(cfg Config, mgr AuthManager) (*Orchestrator, error) {
 		return nil, fmt.Errorf("orchestrator: AuthManager is required")
 	}
 
-	rules := NewRulesPolicy(cfg.Policy.Rules)
+	rules := NewRulesPolicy(
+		cfg.Policy.Rules,
+		WithCatalog(cfg.Catalog),
+		WithCategories(cfg.Categories),
+	)
 	var policy Policy = rules
 	if strings.EqualFold(strings.TrimSpace(cfg.Policy.Kind), "learned") {
 		policy = NewLearnedPolicy(cfg.Policy.Learned, rules)
 	}
 
+	catClass := newCategoryClassifier(cfg.Categories, cfg.Classifier)
+	var (
+		llmClass    *llmCategoryClassifier
+		directClass *directModelClassifier
+	)
+	if classifierUsesLLMCategory(cfg.Classifier) {
+		llmClass = newLLMCategoryClassifier(cfg.Classifier.LLM, catClass, mgr)
+	}
+	if classifierUsesDirectModel(cfg.Classifier) {
+		directClass = newDirectModelClassifier(cfg.Classifier.LLM, cfg.Catalog, mgr)
+	}
+
 	return &Orchestrator{
-		cfg:        cfg,
-		policy:     policy,
-		classifier: NewClassifier(cfg.Difficulty),
-		recorder:   NewTraceRecorder(cfg.Trace),
-		mgr:        mgr,
+		cfg:         cfg,
+		policy:      policy,
+		classifier:  NewClassifier(cfg.Difficulty),
+		catClass:    catClass,
+		llmClass:    llmClass,
+		directClass: directClass,
+		recorder:    NewTraceRecorder(cfg.Trace),
+		mgr:         mgr,
 	}, nil
+}
+
+// classifierUsesLLMCategory reports whether the configured classifier
+// kind engages the LLM-backed CATEGORY classifier (kind: llm OR
+// hybrid, in which case the hybrid LLM fallback is the category
+// classifier — direct-model gets its own hybrid wiring below).
+func classifierUsesLLMCategory(c ClassifierConfig) bool {
+	if !c.LLM.Enabled {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Kind)) {
+	case "llm":
+		return true
+	case "hybrid":
+		// Hybrid uses the category classifier as the LLM fallback
+		// when categories are configured; if the operator wants
+		// hybrid + direct-model they should set kind: direct-model
+		// (heuristics still run first when categories exist).
+		return true
+	default:
+		return false
+	}
+}
+
+// classifierUsesDirectModel reports whether the configured classifier
+// kind engages the direct-model LLM picker.
+func classifierUsesDirectModel(c ClassifierConfig) bool {
+	if !c.LLM.Enabled {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Kind)) {
+	case "direct-model":
+		return true
+	default:
+		return false
+	}
 }
 
 // Close releases any background resources held by the orchestrator. Safe
@@ -138,6 +196,24 @@ type Decision struct {
 	Difficulty Bucket
 	// Mode is the resolved mode string ("single-shot" or "tri-role").
 	Mode string
+	// CategoryHint is the dynamic category name the request matched, or
+	// "" when no category matched. The caller forwards it into
+	// RunRequest.CategoryHint so the per-turn policy can reuse it
+	// across the entire tri-role loop without re-classifying.
+	CategoryHint string
+	// ModelCatalogID is the catalog entry id picked by the direct-model
+	// classifier, or "" when direct-model classification was skipped or
+	// returned no usable match. The caller forwards it into
+	// RunRequest.ModelCatalogID. The rules policy uses it as the
+	// highest-priority Worker-role signal: route directly to that
+	// entry's (provider, model).
+	ModelCatalogID string
+	// NormalizedModel is the upstream model name the rules policy
+	// resolved for single-shot dispatch. When non-empty, the caller
+	// SHOULD send this model name instead of the one it computed from
+	// model resolution alone — this is how per-category model pins
+	// (gemini-flash, gpt-5-mini, etc.) actually reach the executor.
+	NormalizedModel string
 }
 
 // Decide computes the orchestrator's verdict for a single request. It
@@ -168,6 +244,12 @@ func (o *Orchestrator) Decide(ctx context.Context, req DecideRequest) Decision {
 		SourceFormat: req.HandlerType,
 	})
 
+	// Pre-classify the request into either a dynamic category (when
+	// kind: heuristic/llm/hybrid) or a specific catalog model (when
+	// kind: direct-model). Done once per request; the hint is reused on
+	// every turn of the tri-role loop.
+	categoryHint, modelCatalogID := o.runClassifiers(ctx, req)
+
 	mode := o.resolveMode(bucket, req.Headers)
 	useLoop := mode == "tri-role" && supportsLoop(req.HandlerType)
 
@@ -177,20 +259,24 @@ func (o *Orchestrator) Decide(ctx context.Context, req DecideRequest) Decision {
 	// the rules policy returns Worker rather than Thinker).
 	if useLoop {
 		return Decision{
-			DecisionID: newDecisionID(),
-			Providers:  req.Providers,
-			UseLoop:    true,
-			Difficulty: bucket,
-			Mode:       mode,
+			DecisionID:     newDecisionID(),
+			Providers:      req.Providers,
+			UseLoop:        true,
+			Difficulty:     bucket,
+			Mode:           mode,
+			CategoryHint:   categoryHint,
+			ModelCatalogID: modelCatalogID,
 		}
 	}
 
 	state := TurnState{
-		UserModelHint: req.NormalizedModel,
-		Providers:     req.Providers,
-		Difficulty:    BucketMedium,
-		Turn:          0,
-		Budget:        o.cfg.Budgets.MaxTurns,
+		UserModelHint:  req.NormalizedModel,
+		Providers:      req.Providers,
+		Difficulty:     BucketMedium,
+		Turn:           0,
+		Budget:         o.cfg.Budgets.MaxTurns,
+		CategoryHint:   categoryHint,
+		ModelCatalogID: modelCatalogID,
 	}
 
 	deadline := o.cfg.Budgets.SingleShotFallback
@@ -205,18 +291,109 @@ func (o *Orchestrator) Decide(ctx context.Context, req DecideRequest) Decision {
 	}
 
 	providers := req.Providers
+	normalizedModel := ""
 	if err == nil && action.Provider != "" {
 		if pickFirstAvailable([]string{action.Provider}, req.Providers) != "" {
 			providers = []string{action.Provider}
 		}
+		if strings.TrimSpace(action.Model) != "" {
+			normalizedModel = action.Model
+		}
 	}
 
 	return Decision{
-		DecisionID: newDecisionID(),
-		Providers:  providers,
-		UseLoop:    false,
-		Difficulty: bucket,
-		Mode:       mode,
+		DecisionID:      newDecisionID(),
+		Providers:       providers,
+		UseLoop:         false,
+		Difficulty:      bucket,
+		Mode:            mode,
+		CategoryHint:    categoryHint,
+		ModelCatalogID:  modelCatalogID,
+		NormalizedModel: normalizedModel,
+	}
+}
+
+// runClassifiers runs whichever classifier(s) the configuration
+// enabled and returns (categoryHint, modelCatalogID). Either or both
+// may be empty. The implementation is split out of Decide for
+// readability — Decide stays linear, dispatch lives here.
+func (o *Orchestrator) runClassifiers(ctx context.Context, req DecideRequest) (string, string) {
+	kind := strings.ToLower(strings.TrimSpace(o.cfg.Classifier.Kind))
+	switch kind {
+	case "direct-model":
+		// Build the input from the payload once, share it between
+		// classifiers when they coexist.
+		in := buildCategoryInput(req.Payload, req.HandlerType)
+		if o.directClass != nil {
+			if id := o.directClass.classify(ctx, in, req); id != "" {
+				return "", id
+			}
+		}
+		// On miss, fall through to the configured fallback.
+		return o.classifyCategory(ctx, req), ""
+	default:
+		// All other kinds use the category classifier path. The
+		// direct-model classifier is only consulted via kind:
+		// direct-model — there is no implicit hybrid that mixes
+		// categories and direct-model in v2.1. That keeps the prompt
+		// shape, cost surface, and trace records predictable.
+		return o.classifyCategory(ctx, req), ""
+	}
+}
+
+// classifyCategory runs the configured category classifier for a single
+// request. Returns "" when no category matches or when classification
+// is disabled. The function is non-fatal on every error path: it falls
+// back to the heuristic matcher or the configured DefaultCategory.
+func (o *Orchestrator) classifyCategory(ctx context.Context, req DecideRequest) string {
+	if o.catClass == nil || len(o.cfg.Categories) == 0 {
+		return ""
+	}
+	kind := strings.ToLower(strings.TrimSpace(o.cfg.Classifier.Kind))
+	if kind == "" {
+		kind = "heuristic"
+	}
+	in := buildCategoryInput(req.Payload, req.HandlerType)
+
+	switch kind {
+	case "heuristic":
+		return o.catClass.classify(in)
+	case "llm":
+		if o.llmClass != nil {
+			if name := o.llmClass.classify(ctx, in, req); name != "" {
+				return name
+			}
+		}
+		// Fallback strategy.
+		return o.llmFallbackCategory(in)
+	case "hybrid":
+		if name := o.catClass.classify(in); name != "" {
+			return name
+		}
+		if o.llmClass != nil {
+			if name := o.llmClass.classify(ctx, in, req); name != "" {
+				return name
+			}
+		}
+		return o.llmFallbackCategory(in)
+	default:
+		return o.catClass.classify(in)
+	}
+}
+
+// llmFallbackCategory implements the FallbackOnError contract for the
+// LLM classifier. It is invoked when the LLM path failed or returned an
+// unknown category.
+func (o *Orchestrator) llmFallbackCategory(in CategoryInput) string {
+	switch strings.ToLower(strings.TrimSpace(o.cfg.Classifier.LLM.FallbackOnError)) {
+	case "", "heuristic":
+		return o.catClass.classify(in)
+	case "default-category":
+		return strings.TrimSpace(o.cfg.Classifier.LLM.DefaultCategory)
+	case "fail":
+		return ""
+	default:
+		return o.catClass.classify(in)
 	}
 }
 
@@ -281,6 +458,16 @@ type RunRequest struct {
 	Headers         http.Header
 	Alt             string
 	APIKey          string
+
+	// CategoryHint is the dynamic category the orchestrator
+	// pre-classified for this request, propagated from Decision.
+	// Reused across every turn of the loop.
+	CategoryHint string
+
+	// ModelCatalogID is the catalog entry id chosen by the
+	// direct-model classifier, propagated from Decision. Reused
+	// across every Worker turn of the loop.
+	ModelCatalogID string
 
 	// Metadata is forwarded into coreexecutor.Options.Metadata. The
 	// orchestrator augments it but never strips fields.
@@ -364,20 +551,24 @@ func (o *Orchestrator) runLoop(ctx context.Context, req RunRequest, stream bool)
 	}
 
 	state := TurnState{
-		UserModelHint: req.NormalizedModel,
-		Providers:     req.Providers,
-		Difficulty:    req.Difficulty,
-		Budget:        o.cfg.Budgets.MaxTurns,
+		UserModelHint:  req.NormalizedModel,
+		Providers:      req.Providers,
+		Difficulty:     req.Difficulty,
+		Budget:         o.cfg.Budgets.MaxTurns,
+		CategoryHint:   req.CategoryHint,
+		ModelCatalogID: req.ModelCatalogID,
 	}
 
 	traceRec := TraceRecord{
-		DecisionID: req.DecisionID,
-		Time:       time.Now().UTC(),
-		APIKeyHash: hashAPIKey(req.APIKey),
-		Mode:       "tri-role",
-		Difficulty: req.Difficulty.String(),
-		UserHint:   req.NormalizedModel,
-		Providers:  append([]string(nil), req.Providers...),
+		DecisionID:     req.DecisionID,
+		Time:           time.Now().UTC(),
+		APIKeyHash:     hashAPIKey(req.APIKey),
+		Mode:           "tri-role",
+		Difficulty:     req.Difficulty.String(),
+		UserHint:       req.NormalizedModel,
+		Category:       req.CategoryHint,
+		ModelCatalogID: req.ModelCatalogID,
+		Providers:      append([]string(nil), req.Providers...),
 	}
 	defer func() {
 		// Persist whatever we accumulated, success or failure.

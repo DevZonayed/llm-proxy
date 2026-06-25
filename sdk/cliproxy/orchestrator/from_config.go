@@ -83,7 +83,111 @@ func FromConfig(in sdkconfig.OrchestratorConfig) Config {
 		c.Trace.RotateMB = in.Trace.RotateMB
 	}
 
+	if len(in.Catalog) > 0 {
+		c.Catalog = cloneCatalog(in.Catalog)
+	}
+	if len(in.Categories) > 0 {
+		c.Categories = cloneCategories(in.Categories)
+	}
+
+	// Classifier. We treat the section as "explicit" (caller takes
+	// ownership of every field) only when Kind is set. Otherwise the
+	// orchestrator's Default() ClassifierConfig wins — preventing the
+	// common footgun where a YAML block that omits a bool flips it from
+	// its documented default to Go's zero value.
+	if in.Classifier.Kind != "" {
+		c.Classifier.Kind = in.Classifier.Kind
+		c.Classifier.Heuristic.FirstMatchWins = in.Classifier.Heuristic.FirstMatchWins
+	}
+	llm := in.Classifier.LLM
+	c.Classifier.LLM.Enabled = llm.Enabled
+	if llm.Provider != "" {
+		c.Classifier.LLM.Provider = llm.Provider
+	}
+	if llm.Model != "" {
+		c.Classifier.LLM.Model = llm.Model
+	}
+	if llm.TimeoutMS > 0 {
+		c.Classifier.LLM.Timeout = time.Duration(llm.TimeoutMS) * time.Millisecond
+	}
+	if llm.CacheTTLSeconds > 0 {
+		c.Classifier.LLM.CacheTTL = time.Duration(llm.CacheTTLSeconds) * time.Second
+	}
+	if llm.MaxInputChars > 0 {
+		c.Classifier.LLM.MaxInputChars = llm.MaxInputChars
+	}
+	if llm.PromptTemplate != "" {
+		c.Classifier.LLM.PromptTemplate = llm.PromptTemplate
+	}
+	if llm.FallbackOnError != "" {
+		c.Classifier.LLM.FallbackOnError = llm.FallbackOnError
+	}
+	if llm.DefaultCategory != "" {
+		c.Classifier.LLM.DefaultCategory = llm.DefaultCategory
+	}
+
 	return c
+}
+
+// cloneCatalog converts the SDK catalog form into the orchestrator
+// package's CatalogEntry form. The conversion is field-by-field with
+// defensive slice copies so the orchestrator never aliases the loader's
+// memory.
+func cloneCatalog(in []sdkconfig.OrchestratorCatalogEntry) []CatalogEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]CatalogEntry, 0, len(in))
+	for _, e := range in {
+		out = append(out, CatalogEntry{
+			ID:            e.ID,
+			Provider:      e.Provider,
+			Model:         e.Model,
+			Tags:          append([]string(nil), e.Tags...),
+			Description:   e.Description,
+			Instructions:  e.Instructions,
+			Roles:         append([]string(nil), e.Roles...),
+			CostTier:      e.CostTier,
+			LatencyTier:   e.LatencyTier,
+			ContextWindow: e.ContextWindow,
+			Supports:      append([]string(nil), e.Supports...),
+		})
+	}
+	return out
+}
+
+// cloneCategories converts the SDK category form into the orchestrator
+// package's Category form.
+func cloneCategories(in []sdkconfig.OrchestratorCategory) []Category {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Category, 0, len(in))
+	for _, cat := range in {
+		entry := Category{
+			Name:         cat.Name,
+			Instructions: cat.Instructions,
+			Match: CategoryMatch{
+				Keywords:         append([]string(nil), cat.Match.Keywords...),
+				Regex:            append([]string(nil), cat.Match.Regex...),
+				RequireCodeBlock: cat.Match.RequireCodeBlock,
+				MinTokens:        cat.Match.MinTokens,
+				MaxTokens:        cat.Match.MaxTokens,
+				RequireTools:     cat.Match.RequireTools,
+				AnyOf:            append([]string(nil), cat.Match.AnyOf...),
+				NoneOf:           append([]string(nil), cat.Match.NoneOf...),
+			},
+			Prefer: append([]string(nil), cat.Prefer...),
+		}
+		if len(cat.RolePins) > 0 {
+			entry.RolePins = make(map[string]string, len(cat.RolePins))
+			for k, v := range cat.RolePins {
+				entry.RolePins[k] = v
+			}
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func cloneDefaults(in map[string][]string) map[string][]string {
