@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/orchestrator"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -48,6 +49,21 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+
+	// orchestratorRouter is the live master-model router. Mutated via
+	// /v0/management/orchestrator endpoints (see config_lists.go).
+	orchestratorRouter *orchestrator.Router
+}
+
+// SetOrchestratorRouter wires the live router so mutating endpoints can call
+// Router.Reload after persisting config changes.
+func (h *Handler) SetOrchestratorRouter(r *orchestrator.Router) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.orchestratorRouter = r
+	h.mu.Unlock()
 }
 
 // NewHandler creates a new management handler instance.

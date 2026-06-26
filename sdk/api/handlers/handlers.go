@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/orchestrator"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"golang.org/x/net/context"
@@ -302,6 +303,11 @@ type BaseAPIHandler struct {
 
 	// Cfg holds the current application configuration.
 	Cfg *config.SDKConfig
+
+	// Orch is the optional master-model orchestrator (off when nil). When set,
+	// requests whose model equals Orch.Config().RouterAlias are classified by
+	// the master before dispatch. See sdk/cliproxy/orchestrator.
+	Orch *orchestrator.Router
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -318,6 +324,31 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 		Cfg:         cfg,
 		AuthManager: authManager,
 	}
+}
+
+// SetOrchestrator wires the master-model router. Pass nil to disable.
+// Safe to call from server startup after construction.
+func (h *BaseAPIHandler) SetOrchestrator(router *orchestrator.Router) {
+	if h == nil {
+		return
+	}
+	h.Orch = router
+}
+
+// resolveOrchestratedModel applies the master router when applicable.
+// If the orchestrator is configured AND modelName matches the router alias,
+// the master is consulted and the picked model is returned. Otherwise
+// modelName is returned unchanged. A failure inside the router does NOT
+// fail the request — the router returns a Decision with its fallback model.
+func (h *BaseAPIHandler) resolveOrchestratedModel(ctx context.Context, modelName string, rawJSON []byte) string {
+	if h == nil || h.Orch == nil || !h.Orch.ShouldRoute(modelName) {
+		return modelName
+	}
+	dec, _ := h.Orch.Route(ctx, rawJSON)
+	if strings.TrimSpace(dec.Model) == "" {
+		return modelName
+	}
+	return dec.Model
 }
 
 // UpdateClients updates the handlers' client list and configuration.
@@ -534,6 +565,7 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	modelName = h.resolveOrchestratedModel(ctx, modelName, rawJSON)
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
@@ -582,6 +614,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	modelName = h.resolveOrchestratedModel(ctx, modelName, rawJSON)
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
@@ -631,6 +664,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	modelName = h.resolveOrchestratedModel(ctx, modelName, rawJSON)
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)

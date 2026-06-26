@@ -40,6 +40,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/orchestrator"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"gopkg.in/yaml.v3"
@@ -169,6 +170,9 @@ type Server struct {
 	// management handler
 	mgmt *managementHandlers.Handler
 
+	// orchestrator is the master-model request router (off when cfg.Orchestrator.Enabled is false).
+	orchestrator *orchestrator.Router
+
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
 
@@ -275,6 +279,18 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	applySignatureCacheConfig(nil, cfg)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+
+	// Wire the master-model orchestrator (off when cfg.Orchestrator.Enabled is false).
+	// The Caller closure reuses the existing AuthManager.Execute path so the master
+	// call benefits from the same OAuth pool, alias resolution, and retry/cooldown
+	// logic every other request uses.
+	s.orchestrator = orchestrator.New(&cfg.Orchestrator, newOrchestratorCaller(authManager))
+	if s.handlers != nil {
+		s.handlers.SetOrchestrator(s.orchestrator)
+	}
+	if s.mgmt != nil {
+		s.mgmt.SetOrchestratorRouter(s.orchestrator)
+	}
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -641,6 +657,13 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/oauth-model-alias", s.mgmt.PutOAuthModelAlias)
 		mgmt.PATCH("/oauth-model-alias", s.mgmt.PatchOAuthModelAlias)
 		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
+
+		// Master-model orchestrator: classify-then-dispatch via a single picked model.
+		// See sdk/cliproxy/orchestrator and internal/api/handlers/management/config_orchestrator.go.
+		mgmt.GET("/orchestrator", s.mgmt.GetOrchestrator)
+		mgmt.PUT("/orchestrator", s.mgmt.PutOrchestrator)
+		mgmt.PATCH("/orchestrator", s.mgmt.PatchOrchestrator)
+		mgmt.DELETE("/orchestrator", s.mgmt.DeleteOrchestrator)
 
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)

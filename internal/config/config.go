@@ -137,7 +137,69 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// Orchestrator turns one configured "master" model into a request router:
+	// clients call the proxy with model == Orchestrator.RouterAlias, the master
+	// classifies the request and picks one of the AllowedModels (or any known
+	// model when AllowedModels is empty), and the proxy rewrites and dispatches.
+	// Off by default — existing behavior is identical when Enabled == false.
+	Orchestrator Orchestrator `yaml:"orchestrator,omitempty" json:"orchestrator,omitempty"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// Orchestrator configures the master-model request router. See sdk/cliproxy/orchestrator.
+//
+// Wire-up example (config.yaml):
+//
+//	orchestrator:
+//	  enabled: true
+//	  master-model: "gemini-3.5-flash-extra-low"
+//	  router-alias: "master"
+//	  timeout-ms: 8000
+//	  log-decisions: true
+//	  allowed-models:                  # optional whitelist (empty = any)
+//	    - "claude-opus-4-8"
+//	    - "gpt-5.3-codex-spark"
+//	    - "gemini-3-flash"
+//	    ...
+//
+// When enabled and a client sends `model: "<RouterAlias>"`, the proxy calls
+// MasterModel once with a tight JSON-mode router prompt, parses
+// {"model": "...", "reason": "..."}, validates the choice, then rewrites the
+// request's model to the picked one and dispatches normally. On any error,
+// the request falls back to a configurable Fallback model so no client request
+// is ever dropped because of a routing failure.
+type Orchestrator struct {
+	// Enabled toggles the orchestrator. Off by default.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// MasterModel is the upstream model id used to classify incoming requests
+	// (e.g. "gemini-3.5-flash-extra-low"). Should be cheap + fast + reliable JSON.
+	MasterModel string `yaml:"master-model" json:"master-model"`
+
+	// RouterAlias is the model name clients send to invoke the orchestrator
+	// (default "master"). When a request's model equals this string, the master
+	// is consulted; any other model name dispatches normally.
+	RouterAlias string `yaml:"router-alias,omitempty" json:"router-alias,omitempty"`
+
+	// AllowedModels optionally restricts which models the master may pick.
+	// Empty = no restriction (the master may pick any known model name).
+	AllowedModels []string `yaml:"allowed-models,omitempty" json:"allowed-models,omitempty"`
+
+	// Fallback is the model id used when the master errors, times out, or
+	// picks an invalid model. If empty, falls back to MasterModel itself.
+	Fallback string `yaml:"fallback,omitempty" json:"fallback,omitempty"`
+
+	// TimeoutMs is the per-classification timeout in milliseconds. 0 = 8000ms default.
+	TimeoutMs int `yaml:"timeout-ms,omitempty" json:"timeout-ms,omitempty"`
+
+	// LogDecisions, when true, emits an info-level log entry per routed request
+	// with {request_hash, picked_model, reason, latency_ms}. Off by default.
+	LogDecisions bool `yaml:"log-decisions,omitempty" json:"log-decisions,omitempty"`
+
+	// SystemPromptOverride lets operators replace the default router instruction.
+	// Leave empty to use the built-in prompt.
+	SystemPromptOverride string `yaml:"system-prompt-override,omitempty" json:"system-prompt-override,omitempty"`
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests.
