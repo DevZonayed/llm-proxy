@@ -275,6 +275,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	applySignatureCacheConfig(nil, cfg)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	// Wire the request-time handler so mgmt-side orchestrator mutations
+	// can hot-reload the live router (see config_orchestrator.go).
+	if s.handlers != nil {
+		s.mgmt.SetBaseHandler(s.handlers)
+	}
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -641,6 +646,14 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/oauth-model-alias", s.mgmt.PutOAuthModelAlias)
 		mgmt.PATCH("/oauth-model-alias", s.mgmt.PatchOAuthModelAlias)
 		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
+
+		// Fugu-style orchestrator: classify-then-dispatch via a single
+		// configured master. See sdk/cliproxy/orchestrator and
+		// internal/api/handlers/management/config_orchestrator.go.
+		mgmt.GET("/orchestrator", s.mgmt.GetOrchestrator)
+		mgmt.PUT("/orchestrator", s.mgmt.PutOrchestrator)
+		mgmt.PATCH("/orchestrator", s.mgmt.PatchOrchestrator)
+		mgmt.DELETE("/orchestrator", s.mgmt.DeleteOrchestrator)
 
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
