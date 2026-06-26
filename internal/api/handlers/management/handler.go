@@ -18,8 +18,17 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/orchestrator"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// BaseHandlerRef is the slice of *handlers.BaseAPIHandler the management
+// layer needs in order to swap the live orchestrator after a config edit.
+// Defined as an interface so this package doesn't have to import the full
+// handler package (which would pull in a large transitive graph).
+type BaseHandlerRef interface {
+	SetOrchestrator(*orchestrator.Orchestrator)
+}
 
 type attemptInfo struct {
 	count        int
@@ -48,6 +57,24 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+
+	// baseHandler is the live request-time handler that owns the active
+	// Orchestrator instance. After mutating cfg.Orchestrator via the
+	// management API, we rebuild the orchestrator and call
+	// baseHandler.SetOrchestrator so the change takes effect without a restart.
+	baseHandler BaseHandlerRef
+}
+
+// SetBaseHandler wires the request-time handler so orchestrator hot-reload
+// after a /v0/management/orchestrator mutation can swap the live instance.
+// Safe to call from server startup after both objects exist.
+func (h *Handler) SetBaseHandler(bh BaseHandlerRef) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.baseHandler = bh
+	h.mu.Unlock()
 }
 
 // NewHandler creates a new management handler instance.
