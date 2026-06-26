@@ -58,6 +58,34 @@ services:
     networks:
       - dokploy-network
 
+  # Transparent OpenAI-compatible sidecar that wraps cli-proxy-api and
+  # prefixes the assistant's reply with `[<actual-model>] ` so callers can
+  # see which model the Fugu orchestrator picked without having to read the
+  # JSON `model` field. Supports streaming + non-streaming + every OpenAI
+  # parameter (passes the body bytes-for-bytes). Opt-out per request with
+  # the header `X-Router-Prefix: off`. Source: ./router-shim/app.py.
+  router-shim:
+    build:
+      context: ./router-shim
+      dockerfile: Dockerfile
+    environment:
+      UPSTREAM_BASE_URL: http://cli-proxy-api:8317
+      TZ: ${TZ:-Etc/UTC}
+    expose:
+      - "8000"
+    depends_on:
+      cli-proxy-api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/_shim/health',timeout=2).status==200 else 1)"]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    networks:
+      - dokploy-network
+
 volumes:
   cli-proxy-auths:
   cli-proxy-logs:
